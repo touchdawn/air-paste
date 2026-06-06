@@ -81,7 +81,7 @@ File transfer MVP notes:
 
 - The source agent exposes `GET /v1/files/{transfer_token}/{index}` on its `--peer-bind` address.
 - The file manifest includes `source_peer_url`; use `--peer-public-url` when another device cannot reach the bind address literally.
-- Peer file requests must include `x-airpaste-clip-id`, `x-airpaste-source-device-id`, and `x-airpaste-requester-device-id`; this binds the MVP request to the advertised clip/source/requester before the later device-signature layer.
+- Peer file requests must include `x-airpaste-clip-id`, `x-airpaste-source-device-id`, `x-airpaste-requester-device-id`, and an Ed25519 `x-airpaste-signature`; the source agent verifies the requester against trusted device public keys from the server.
 - The peer transfer token has a local TTL, defaults to 600 seconds, and each file index can be downloaded once.
 - File manifest publication is limited by `--max-file-count` and `--max-total-file-bytes`.
 - Only regular files are downloaded in this MVP. Directories are announced in the manifest but skipped by transfer.

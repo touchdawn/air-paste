@@ -6,6 +6,7 @@ use std::{fs, path::PathBuf};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentState {
     pub device_id: Option<DeviceId>,
+    pub device_private_key: Option<String>,
 }
 
 #[derive(Clone, Debug)]

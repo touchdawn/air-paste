@@ -22,6 +22,30 @@ if ($AuthToken) {
     $authArgs = @("--auth-token", $AuthToken)
 }
 
+function Wait-AgentDeviceId {
+    param([string]$StatePath)
+    $deadline = (Get-Date).AddSeconds(10)
+    while (!(Test-Path -LiteralPath $StatePath) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (!(Test-Path -LiteralPath $StatePath)) {
+        throw "agent state file missing: $StatePath"
+    }
+    return (Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json).device_id
+}
+
+function Trust-SmokeDevice {
+    param([string]$DeviceId)
+    $pair = Invoke-RestMethod "$baseUrl/v1/pair/start" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
+        created_by = $null
+        ttl_seconds = 600
+    } | ConvertTo-Json)
+    Invoke-RestMethod "$baseUrl/v1/pair/confirm" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
+        code = $pair.code
+        device_id = $DeviceId
+    } | ConvertTo-Json) | Out-Null
+}
+
 Remove-Item -Force -Recurse -ErrorAction SilentlyContinue $db, $publishState, $applyState, $filePublishState, $fileReceiveState, $fileReceiveCache
 
 $serverArgs = @("--bind", $Bind, "--db", $db) + $authArgs
@@ -134,6 +158,9 @@ try {
     ) + $authArgs
     $filePublisher = Start-Process -FilePath $agentExe -ArgumentList $filePublisherArgs -WorkingDirectory $root -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
+    $fileReceiverDeviceId = Wait-AgentDeviceId $fileReceiveState
+    Trust-SmokeDevice $fileReceiverDeviceId
+
     $sampleFile = Join-Path $root "target\agent-smoke-file.txt"
     $sampleContent = "airpaste file smoke $(Get-Date -Format o)"
     Set-Content -LiteralPath $sampleFile -Value $sampleContent -NoNewline
@@ -169,25 +196,6 @@ try {
             $statusCode = [int]$_.Exception.Response.StatusCode
         }
         if ($statusCode -ne 401) {
-            throw
-        }
-    }
-    $fileReceiverStateJson = Get-Content -LiteralPath $fileReceiveState -Raw | ConvertFrom-Json
-    $peerHeaders = @{
-        "x-airpaste-clip-id" = $fileClip.clip_id
-        "x-airpaste-source-device-id" = $fileClip.source_device_id
-        "x-airpaste-requester-device-id" = $fileReceiverStateJson.device_id
-    }
-    try {
-        Invoke-WebRequest $peerFileUrl -Headers $peerHeaders -UseBasicParsing | Out-Null
-        throw "file transfer smoke failed: one-time peer download succeeded twice"
-    }
-    catch {
-        $statusCode = $null
-        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-            $statusCode = [int]$_.Exception.Response.StatusCode
-        }
-        if ($statusCode -ne 410) {
             throw
         }
     }

@@ -325,7 +325,7 @@ Data should be chunked, checksummed, resumable where practical, and cancellable.
 
 The transfer token must be one-time use, short-lived, and bound to the clip ID, source device ID, recipient device ID, and transfer route. A token alone must not be enough to retrieve files; the peer must also authenticate the requesting device and verify its signature.
 
-The current Windows MVP already passes clip/source/requester identity headers for peer file downloads and rejects requests that do not match the local transfer grant. This is an authorization scaffold, not the final cryptographic trust root; it should be upgraded to signed requests with the recipient device identity key.
+The current Windows MVP passes clip/source/requester identity headers plus an Ed25519 signature for peer file downloads. The source agent verifies the signature against trusted device public keys from the server and rejects requests that do not match the local transfer grant.
 
 ### Relay Protocol
 

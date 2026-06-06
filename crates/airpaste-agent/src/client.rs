@@ -1,4 +1,7 @@
-use airpaste_core::{ClipId, ClipKind, ClipRecord, Device, DeviceId, EncryptionInfo};
+use crate::identity::{DeviceIdentity, PEER_FILE_SIGNATURE_ALG};
+use airpaste_core::{
+    ClipId, ClipKind, ClipRecord, Device, DeviceId, EncryptionInfo, TransferToken,
+};
 use airpaste_protocol::{
     CreateClipRequest, CreateClipResponse, RegisterDeviceRequest, RegisterDeviceResponse,
 };
@@ -63,6 +66,16 @@ impl ServerClient {
         Ok(response.device)
     }
 
+    pub async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+        self.authorized(self.http.get(format!("{}/v1/devices", self.base_url)))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<Device>>()
+            .await
+            .context("failed to decode device list")
+    }
+
     pub async fn create_clip(
         &self,
         source_device_id: DeviceId,
@@ -103,7 +116,17 @@ impl ServerClient {
         clip_id: &ClipId,
         source_device_id: &DeviceId,
         requester_device_id: &DeviceId,
+        identity: &DeviceIdentity,
     ) -> anyhow::Result<bytes::Bytes> {
+        let (transfer_token, index) = peer_file_url_parts(url)?;
+        let signature = identity.sign_peer_file_request(
+            clip_id,
+            source_device_id,
+            requester_device_id,
+            &transfer_token,
+            index,
+        );
+
         self.http
             .get(url)
             .header("x-airpaste-clip-id", clip_id.as_str())
@@ -112,6 +135,8 @@ impl ServerClient {
                 "x-airpaste-requester-device-id",
                 requester_device_id.as_str(),
             )
+            .header("x-airpaste-signature-alg", PEER_FILE_SIGNATURE_ALG)
+            .header("x-airpaste-signature", signature)
             .send()
             .await?
             .error_for_status()?
@@ -127,4 +152,17 @@ impl ServerClient {
             request
         }
     }
+}
+
+fn peer_file_url_parts(url: &str) -> anyhow::Result<(TransferToken, usize)> {
+    let mut parts = url.trim_end_matches('/').rsplit('/');
+    let index = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("peer file URL missing index"))?
+        .parse::<usize>()
+        .context("peer file URL index must be a number")?;
+    let transfer_token = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("peer file URL missing transfer token"))?;
+    Ok((TransferToken::from(transfer_token.to_string()), index))
 }

@@ -1,3 +1,4 @@
+use crate::identity::{verify_peer_file_request, PEER_FILE_SIGNATURE_ALG};
 use airpaste_core::{ClipId, DeviceId, TransferToken};
 use axum::{
     body::Body,
@@ -24,6 +25,7 @@ pub struct PeerFileRegistry {
 struct PeerFileGrant {
     clip_id: ClipId,
     source_device_id: DeviceId,
+    authorized_public_keys: HashMap<DeviceId, String>,
     paths: Vec<PathBuf>,
     expires_at: Instant,
     served_indexes: HashSet<usize>,
@@ -33,6 +35,8 @@ struct PeerFileRequest {
     clip_id: String,
     source_device_id: String,
     requester_device_id: String,
+    signature_alg: String,
+    signature: String,
 }
 
 enum PeerFileClaim {
@@ -49,6 +53,7 @@ impl PeerFileRegistry {
         token: &TransferToken,
         clip_id: ClipId,
         source_device_id: DeviceId,
+        authorized_public_keys: HashMap<DeviceId, String>,
         paths: Vec<PathBuf>,
         ttl: Duration,
     ) -> anyhow::Result<()> {
@@ -62,6 +67,7 @@ impl PeerFileRegistry {
             PeerFileGrant {
                 clip_id,
                 source_device_id,
+                authorized_public_keys,
                 paths,
                 expires_at: Instant::now() + ttl,
                 served_indexes: HashSet::new(),
@@ -98,6 +104,30 @@ impl PeerFileRegistry {
             || request.requester_device_id == grant.source_device_id.as_str()
         {
             return Ok(PeerFileClaim::Unauthorized("invalid requester device"));
+        }
+        if request.signature_alg != PEER_FILE_SIGNATURE_ALG {
+            return Ok(PeerFileClaim::Unauthorized(
+                "unsupported signature algorithm",
+            ));
+        }
+        let requester_device_id = DeviceId::from(request.requester_device_id.clone());
+        let Some(public_key) = grant.authorized_public_keys.get(&requester_device_id) else {
+            return Ok(PeerFileClaim::Unauthorized(
+                "requester device is not trusted",
+            ));
+        };
+        if verify_peer_file_request(
+            public_key,
+            &request.signature,
+            grant.clip_id.as_str(),
+            grant.source_device_id.as_str(),
+            &request.requester_device_id,
+            token,
+            index,
+        )
+        .is_err()
+        {
+            return Ok(PeerFileClaim::Unauthorized("invalid requester signature"));
         }
         if grant.served_indexes.contains(&index) {
             return Ok(PeerFileClaim::AlreadyServed);
@@ -193,6 +223,8 @@ fn peer_file_request_from_headers(headers: &HeaderMap) -> Option<PeerFileRequest
         clip_id: header_value(headers, "x-airpaste-clip-id")?,
         source_device_id: header_value(headers, "x-airpaste-source-device-id")?,
         requester_device_id: header_value(headers, "x-airpaste-requester-device-id")?,
+        signature_alg: header_value(headers, "x-airpaste-signature-alg")?,
+        signature: header_value(headers, "x-airpaste-signature")?,
     })
 }
 
