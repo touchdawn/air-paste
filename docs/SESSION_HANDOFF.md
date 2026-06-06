@@ -6,16 +6,19 @@ This document is for the next coding session. It summarizes the current repo sta
 
 ## Current Repository State
 
-Branch: `codex/macos-agent`
+Branch: `main`
 
 Recent commits:
 
+- `3b742f5 test: assert sha256 in macos smoke`
+- `ef66401 Merge remote-tracking branch 'origin/main' into codex/macos-agent`
+- `6350a59 feat: improve macos agent smoke and hotkey`
+- `711f77d feat: verify peer files with sha256`
+- `c2de004 feat: enforce single file transfer limits`
+- `16ac9af feat: verify peer file download sizes`
+- `81d693f feat: stream peer file downloads`
 - `935edaf Merge remote-tracking branch 'origin/main' into codex/macos-agent`
 - `fda0af2 feat: add macos agent clipboard and hotkey`
-- `13c3907 feat: sign sensitive server requests`
-- `cf86126 feat: restrict server APIs to trusted devices`
-- `2813084 docs: add handoff and macos agent plan`
-- `f692f31 feat: let agents confirm pairing codes`
 
 The workspace currently contains:
 
