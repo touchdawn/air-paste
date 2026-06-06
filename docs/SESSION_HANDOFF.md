@@ -180,7 +180,7 @@ Security and trust:
 
 Transfer:
 
-- Peer file server reads each file into memory with `std::fs::read`.
+- Peer file server streams file responses from disk instead of buffering entire files in memory.
 - Directories are represented in the manifest but skipped by transfer.
 - There is no recursive directory copy.
 - There is no resume, chunking, checksum validation, or transfer progress.
@@ -209,7 +209,6 @@ Options:
 
 Useful incremental improvements:
 
-- Stream files instead of reading them fully into memory.
 - Add max single-file size.
 - Add SHA-256 while streaming, or at least optional post-download size verification.
 - Add directory walking with file count and total-size caps.
