@@ -70,6 +70,7 @@ agent_log_filter="${AIRPASTE_SMOKE_AGENT_RUST_LOG:-airpaste_agent=info}"
 server_pid=""
 receiver_pid=""
 publisher_pid=""
+latest_clip_json=""
 peer_base=$((30000 + RANDOM % 20000))
 receiver_peer="127.0.0.1:$peer_base"
 publisher_peer_port=$((peer_base + 1))
@@ -195,18 +196,35 @@ wait_for_log_pattern() {
   return 1
 }
 
+file_sha256() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+first_file_sha256_from_clip() {
+  sed -n 's/.*"sha256":"\([0-9a-f][0-9a-f]*\)".*/\1/p' | head -n 1
+}
+
+assert_sha256_hex() {
+  local value="$1"
+  local label="$2"
+  if ! printf "%s" "$value" | grep -Eq '^[0-9a-f]{64}$'; then
+    fail "$label is not a 64-character lowercase SHA-256 hex digest: $value"
+  fi
+}
+
 wait_for_latest_file_clip() {
   local wait_secs="$1"
   local deadline=$((SECONDS + wait_secs))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if run_agent \
+    if latest_clip_json="$(run_agent \
       --server-url "$base_url" \
       --state-path "$tmpdir/bootstrap.json" \
       --device-name "Mac Hotkey Bootstrap" \
       --publish-clipboard=false \
       --apply-remote=false \
       --remote-paste-hotkey=false \
-      --print-latest-clip | grep -q '"files"'; then
+      --print-latest-clip)" \
+      && printf "%s" "$latest_clip_json" | grep -q '"files"'; then
       return 0
     fi
     sleep 0.25
@@ -276,6 +294,12 @@ osascript -e "set the clipboard to POSIX file \"$source_file\""
 
 wait_for_latest_file_clip 10 \
   || fail "publisher did not publish a file manifest"
+source_sha256="$(file_sha256 "$source_file")"
+manifest_sha256="$(printf "%s" "$latest_clip_json" | first_file_sha256_from_clip)"
+assert_sha256_hex "$manifest_sha256" "manifest file sha256"
+if [ "$manifest_sha256" != "$source_sha256" ]; then
+  fail "manifest sha256 $manifest_sha256 did not match source sha256 $source_sha256"
+fi
 ensure_running "$receiver_pid" "receiver"
 sleep 1
 
@@ -291,6 +315,10 @@ PROMPT
 
 downloaded_file="$(wait_for_file_download "$(basename "$source_file")" "$source_body" "$timeout_secs")" \
   || fail "Ctrl+Shift+V did not download the pending file within ${timeout_secs}s"
+downloaded_sha256="$(file_sha256 "$downloaded_file")"
+if [ "$downloaded_sha256" != "$manifest_sha256" ]; then
+  fail "downloaded file sha256 $downloaded_sha256 did not match manifest sha256 $manifest_sha256"
+fi
 
 clipboard_info="$(osascript -e 'clipboard info' 2>/dev/null || true)"
 case "$clipboard_info" in

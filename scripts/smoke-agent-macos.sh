@@ -151,6 +151,22 @@ wait_for_text_clipboard() {
   return 1
 }
 
+file_sha256() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+first_file_sha256_from_clip() {
+  sed -n 's/.*"sha256":"\([0-9a-f][0-9a-f]*\)".*/\1/p' | head -n 1
+}
+
+assert_sha256_hex() {
+  local value="$1"
+  local label="$2"
+  if ! printf "%s" "$value" | grep -Eq '^[0-9a-f]{64}$'; then
+    fail "$label is not a 64-character lowercase SHA-256 hex digest: $value"
+  fi
+}
+
 echo "Building Air Paste binaries"
 cargo build -p airpaste-server -p airpaste-agent >/dev/null
 
@@ -230,15 +246,17 @@ osascript -e "set the clipboard to POSIX file \"$source_file\""
 
 latest_deadline=$((SECONDS + 10))
 file_manifest_seen=false
+latest_clip_json=""
 while [ "$SECONDS" -lt "$latest_deadline" ]; do
-  if run_agent \
+  if latest_clip_json="$(run_agent \
     --server-url "$base_url" \
     --state-path "$tmpdir/bootstrap.json" \
     --device-name "Mac Smoke Bootstrap" \
     --publish-clipboard=false \
     --apply-remote=false \
     --remote-paste-hotkey=false \
-    --print-latest-clip | grep -q '"files"'; then
+    --print-latest-clip)" \
+    && printf "%s" "$latest_clip_json" | grep -q '"files"'; then
     file_manifest_seen=true
     break
   fi
@@ -246,6 +264,12 @@ while [ "$SECONDS" -lt "$latest_deadline" ]; do
 done
 if [ "$file_manifest_seen" != true ]; then
   fail "file manifest was not published"
+fi
+source_sha256="$(file_sha256 "$source_file")"
+manifest_sha256="$(printf "%s" "$latest_clip_json" | first_file_sha256_from_clip)"
+assert_sha256_hex "$manifest_sha256" "manifest file sha256"
+if [ "$manifest_sha256" != "$source_sha256" ]; then
+  fail "manifest sha256 $manifest_sha256 did not match source sha256 $source_sha256"
 fi
 
 downloaded_json="$(run_agent \
@@ -264,6 +288,10 @@ if [ -z "$downloaded_file" ]; then
 fi
 if [ ! -f "$downloaded_file" ] || [ "$(cat "$downloaded_file")" != "$source_body" ]; then
   fail "downloaded file content did not match source"
+fi
+downloaded_sha256="$(file_sha256 "$downloaded_file")"
+if [ "$downloaded_sha256" != "$manifest_sha256" ]; then
+  fail "downloaded file sha256 $downloaded_sha256 did not match manifest sha256 $manifest_sha256"
 fi
 clipboard_info="$(osascript -e 'clipboard info' 2>/dev/null || true)"
 case "$clipboard_info" in
