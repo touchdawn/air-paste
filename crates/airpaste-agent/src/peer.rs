@@ -1,8 +1,8 @@
-use airpaste_core::TransferToken;
+use airpaste_core::{ClipId, DeviceId, TransferToken};
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -22,9 +22,17 @@ pub struct PeerFileRegistry {
 }
 
 struct PeerFileGrant {
+    clip_id: ClipId,
+    source_device_id: DeviceId,
     paths: Vec<PathBuf>,
     expires_at: Instant,
     served_indexes: HashSet<usize>,
+}
+
+struct PeerFileRequest {
+    clip_id: String,
+    source_device_id: String,
+    requester_device_id: String,
 }
 
 enum PeerFileClaim {
@@ -32,12 +40,15 @@ enum PeerFileClaim {
     NotFound,
     Expired,
     AlreadyServed,
+    Unauthorized(&'static str),
 }
 
 impl PeerFileRegistry {
     pub fn register(
         &self,
         token: &TransferToken,
+        clip_id: ClipId,
+        source_device_id: DeviceId,
         paths: Vec<PathBuf>,
         ttl: Duration,
     ) -> anyhow::Result<()> {
@@ -49,6 +60,8 @@ impl PeerFileRegistry {
         guard.insert(
             token.as_str().to_string(),
             PeerFileGrant {
+                clip_id,
+                source_device_id,
                 paths,
                 expires_at: Instant::now() + ttl,
                 served_indexes: HashSet::new(),
@@ -57,7 +70,12 @@ impl PeerFileRegistry {
         Ok(())
     }
 
-    fn claim(&self, token: &str, index: usize) -> anyhow::Result<PeerFileClaim> {
+    fn claim(
+        &self,
+        token: &str,
+        index: usize,
+        request: PeerFileRequest,
+    ) -> anyhow::Result<PeerFileClaim> {
         let mut guard = self
             .inner
             .lock()
@@ -69,6 +87,17 @@ impl PeerFileRegistry {
         if Instant::now() > grant.expires_at {
             guard.remove(token);
             return Ok(PeerFileClaim::Expired);
+        }
+        if request.clip_id != grant.clip_id.as_str() {
+            return Ok(PeerFileClaim::Unauthorized("clip mismatch"));
+        }
+        if request.source_device_id != grant.source_device_id.as_str() {
+            return Ok(PeerFileClaim::Unauthorized("source device mismatch"));
+        }
+        if request.requester_device_id.is_empty()
+            || request.requester_device_id == grant.source_device_id.as_str()
+        {
+            return Ok(PeerFileClaim::Unauthorized("invalid requester device"));
         }
         if grant.served_indexes.contains(&index) {
             return Ok(PeerFileClaim::AlreadyServed);
@@ -98,9 +127,10 @@ pub async fn run_peer_server(bind: SocketAddr, registry: PeerFileRegistry) -> an
 
 async fn download_file(
     State(registry): State<PeerFileRegistry>,
+    headers: HeaderMap,
     Path((token, index)): Path<(String, usize)>,
 ) -> Response {
-    match download_file_inner(registry, &token, index) {
+    match download_file_inner(registry, headers, &token, index) {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(%error, "peer file download failed");
@@ -111,10 +141,14 @@ async fn download_file(
 
 fn download_file_inner(
     registry: PeerFileRegistry,
+    headers: HeaderMap,
     token: &str,
     index: usize,
 ) -> anyhow::Result<Response> {
-    let path = match registry.claim(token, index)? {
+    let Some(request) = peer_file_request_from_headers(&headers) else {
+        return Ok((StatusCode::UNAUTHORIZED, "missing peer transfer headers").into_response());
+    };
+    let path = match registry.claim(token, index, request)? {
         PeerFileClaim::Available(path) => path,
         PeerFileClaim::NotFound => {
             return Ok((StatusCode::NOT_FOUND, "file not found").into_response())
@@ -124,6 +158,9 @@ fn download_file_inner(
         }
         PeerFileClaim::AlreadyServed => {
             return Ok((StatusCode::GONE, "file already downloaded").into_response())
+        }
+        PeerFileClaim::Unauthorized(reason) => {
+            return Ok((StatusCode::UNAUTHORIZED, reason).into_response())
         }
     };
     let metadata = std::fs::metadata(&path)?;
@@ -149,4 +186,21 @@ fn download_file_inner(
         )
         .body(Body::from(body))?;
     Ok(response)
+}
+
+fn peer_file_request_from_headers(headers: &HeaderMap) -> Option<PeerFileRequest> {
+    Some(PeerFileRequest {
+        clip_id: header_value(headers, "x-airpaste-clip-id")?,
+        source_device_id: header_value(headers, "x-airpaste-source-device-id")?,
+        requester_device_id: header_value(headers, "x-airpaste-requester-device-id")?,
+    })
+}
+
+fn header_value(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }

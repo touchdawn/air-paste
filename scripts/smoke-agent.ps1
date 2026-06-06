@@ -161,6 +161,25 @@ try {
     $peerFileUrl = "http://127.0.0.1:17391/v1/files/$($fileClip.kind.files.transfer_token)/0"
     try {
         Invoke-WebRequest $peerFileUrl -UseBasicParsing | Out-Null
+        throw "file transfer smoke failed: unauthenticated peer download succeeded"
+    }
+    catch {
+        $statusCode = $null
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+        }
+        if ($statusCode -ne 401) {
+            throw
+        }
+    }
+    $fileReceiverStateJson = Get-Content -LiteralPath $fileReceiveState -Raw | ConvertFrom-Json
+    $peerHeaders = @{
+        "x-airpaste-clip-id" = $fileClip.clip_id
+        "x-airpaste-source-device-id" = $fileClip.source_device_id
+        "x-airpaste-requester-device-id" = $fileReceiverStateJson.device_id
+    }
+    try {
+        Invoke-WebRequest $peerFileUrl -Headers $peerHeaders -UseBasicParsing | Out-Null
         throw "file transfer smoke failed: one-time peer download succeeded twice"
     }
     catch {

@@ -97,9 +97,21 @@ impl ServerClient {
         .context("failed to decode clip")
     }
 
-    pub async fn download_bytes(&self, url: &str) -> anyhow::Result<bytes::Bytes> {
+    pub async fn download_peer_file(
+        &self,
+        url: &str,
+        clip_id: &ClipId,
+        source_device_id: &DeviceId,
+        requester_device_id: &DeviceId,
+    ) -> anyhow::Result<bytes::Bytes> {
         self.http
             .get(url)
+            .header("x-airpaste-clip-id", clip_id.as_str())
+            .header("x-airpaste-source-device-id", source_device_id.as_str())
+            .header(
+                "x-airpaste-requester-device-id",
+                requester_device_id.as_str(),
+            )
             .send()
             .await?
             .error_for_status()?

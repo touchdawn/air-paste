@@ -16,8 +16,8 @@ use crate::{
     state_file::{AgentState, StateFile},
 };
 use airpaste_core::{
-    BlobRef, ClipKind, DeviceId, EncryptionInfo, FileClip, FileEntry, FileEntryKind, TextClip,
-    TransferToken,
+    BlobRef, ClipId, ClipKind, DeviceId, EncryptionInfo, FileClip, FileEntry, FileEntryKind,
+    TextClip, TransferToken,
 };
 use airpaste_protocol::ServerEvent;
 use anyhow::{bail, Context};
@@ -39,6 +39,13 @@ struct FileTransferPolicy {
     max_total_file_bytes: u64,
     transfer_token_ttl: Duration,
     transfer_token_ttl_secs: u64,
+}
+
+#[derive(Clone)]
+struct PendingFileClip {
+    clip_id: ClipId,
+    source_device_id: DeviceId,
+    file_clip: FileClip,
 }
 
 #[tokio::main]
@@ -73,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let paste = Arc::new(PasteSimulator::new());
     let last_local_write = Arc::new(Mutex::new(None::<String>));
     let last_local_file_write = Arc::new(Mutex::new(None::<String>));
-    let pending_file_clip = Arc::new(Mutex::new(None::<FileClip>));
+    let pending_file_clip = Arc::new(Mutex::new(None::<PendingFileClip>));
     let peer_registry = PeerFileRegistry::default();
     let peer_public_url = args
         .peer_public_url
@@ -299,12 +306,6 @@ async fn publish_file_manifest(
 
     let transfer_expires_at = airpaste_core::now()
         + ChronoDuration::seconds(file_policy.transfer_token_ttl_secs.min(i64::MAX as u64) as i64);
-    peer_registry.register(
-        &transfer_token,
-        paths.clone(),
-        file_policy.transfer_token_ttl,
-    )?;
-
     let file_count = files.len();
     let response = client
         .create_clip(
@@ -312,7 +313,7 @@ async fn publish_file_manifest(
             ClipKind::Files(FileClip {
                 files,
                 total_size,
-                transfer_token,
+                transfer_token: transfer_token.clone(),
                 source_peer_url: Some(peer_public_url.trim_end_matches('/').to_string()),
                 transfer_expires_at: Some(transfer_expires_at),
             }),
@@ -328,6 +329,13 @@ async fn publish_file_manifest(
         total_size,
         "published file manifest"
     );
+    peer_registry.register(
+        &transfer_token,
+        response.clip_id,
+        device_id.clone(),
+        paths.clone(),
+        file_policy.transfer_token_ttl,
+    )?;
 
     Ok(())
 }
@@ -351,7 +359,7 @@ async fn run_ws(
     device_id: DeviceId,
     last_local_write: Arc<Mutex<Option<String>>>,
     last_local_file_write: Arc<Mutex<Option<String>>>,
-    pending_file_clip: Arc<Mutex<Option<FileClip>>>,
+    pending_file_clip: Arc<Mutex<Option<PendingFileClip>>>,
     apply_remote: bool,
     paste: Arc<PasteSimulator>,
     remote_paste_hotkey: bool,
@@ -366,6 +374,7 @@ async fn run_ws(
             Ok(()) => {
                 let hotkey_client = client.clone();
                 let hotkey_clipboard = clipboard.clone();
+                let hotkey_device_id = device_id.clone();
                 let hotkey_last_local_file_write = last_local_file_write.clone();
                 let hotkey_pending_file_clip = pending_file_clip.clone();
                 let hotkey_paste = paste.clone();
@@ -376,6 +385,7 @@ async fn run_ws(
                         if let Err(error) = apply_pending_file_clip(
                             &hotkey_client,
                             &hotkey_clipboard,
+                            &hotkey_device_id,
                             &hotkey_last_local_file_write,
                             &hotkey_pending_file_clip,
                             &hotkey_paste,
@@ -425,7 +435,7 @@ async fn run_ws_once(
     device_id: &DeviceId,
     last_local_write: &Mutex<Option<String>>,
     last_local_file_write: &Mutex<Option<String>>,
-    pending_file_clip: &Mutex<Option<FileClip>>,
+    pending_file_clip: &Mutex<Option<PendingFileClip>>,
     apply_remote: bool,
     paste: &PasteSimulator,
     file_policy: &FileTransferPolicy,
@@ -475,7 +485,7 @@ async fn handle_server_event(
     device_id: &DeviceId,
     last_local_write: &Mutex<Option<String>>,
     last_local_file_write: &Mutex<Option<String>>,
-    pending_file_clip: &Mutex<Option<FileClip>>,
+    pending_file_clip: &Mutex<Option<PendingFileClip>>,
     event: ServerEvent,
     apply_remote: bool,
     paste: &PasteSimulator,
@@ -506,6 +516,8 @@ async fn handle_server_event(
             kind,
         } if apply_remote && source_device_id != *device_id && kind == "files" => {
             let clip = client.get_clip(clip_id).await?;
+            let pending_clip_id = clip.clip_id.clone();
+            let pending_source_device_id = clip.source_device_id.clone();
             let ClipKind::Files(file_clip) = clip.kind else {
                 return Ok(());
             };
@@ -515,11 +527,16 @@ async fn handle_server_event(
                 total_size = file_clip.total_size,
                 "remote file clipboard available"
             );
-            *pending_file_clip.lock().await = Some(file_clip);
+            *pending_file_clip.lock().await = Some(PendingFileClip {
+                clip_id: pending_clip_id,
+                source_device_id: pending_source_device_id,
+                file_clip,
+            });
             if auto_apply_files {
                 apply_pending_file_clip(
                     client,
                     clipboard,
+                    device_id,
                     last_local_file_write,
                     pending_file_clip,
                     paste,
@@ -547,20 +564,23 @@ async fn handle_server_event(
 async fn apply_pending_file_clip(
     client: &ServerClient,
     clipboard: &Clipboard,
+    requester_device_id: &DeviceId,
     last_local_file_write: &Mutex<Option<String>>,
-    pending_file_clip: &Mutex<Option<FileClip>>,
+    pending_file_clip: &Mutex<Option<PendingFileClip>>,
     paste: &PasteSimulator,
     file_policy: &FileTransferPolicy,
     paste_after_apply: bool,
     cache_dir: &Path,
 ) -> anyhow::Result<()> {
-    let Some(file_clip) = pending_file_clip.lock().await.clone() else {
+    let Some(pending) = pending_file_clip.lock().await.clone() else {
         tracing::info!("remote paste requested with no pending file clip");
         return Ok(());
     };
+    let file_clip = &pending.file_clip;
     validate_file_clip(&file_clip, file_policy)?;
 
-    let downloaded_files = download_remote_files(client, cache_dir, &file_clip).await?;
+    let downloaded_files =
+        download_remote_files(client, cache_dir, requester_device_id, &pending).await?;
     if downloaded_files.is_empty() {
         bail!("remote file clip did not contain downloadable files");
     }
@@ -610,8 +630,10 @@ fn validate_file_clip(
 async fn download_remote_files(
     client: &ServerClient,
     cache_dir: &Path,
-    file_clip: &FileClip,
+    requester_device_id: &DeviceId,
+    pending: &PendingFileClip,
 ) -> anyhow::Result<Vec<PathBuf>> {
+    let file_clip = &pending.file_clip;
     let Some(source_peer_url) = &file_clip.source_peer_url else {
         bail!("remote file clip has no source_peer_url");
     };
@@ -635,7 +657,14 @@ async fn download_remote_files(
             file_clip.transfer_token.as_str(),
             index
         );
-        let bytes = client.download_bytes(&url).await?;
+        let bytes = client
+            .download_peer_file(
+                &url,
+                &pending.clip_id,
+                &pending.source_device_id,
+                requester_device_id,
+            )
+            .await?;
         let destination = safe_cache_path(&clip_cache_dir, &entry.display_name);
         tokio::fs::write(&destination, bytes).await?;
         tracing::info!(path = %destination.display(), "downloaded remote file");
