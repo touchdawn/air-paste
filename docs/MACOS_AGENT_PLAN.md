@@ -47,6 +47,14 @@ Scope:
 
 Do not start with UI or packaging.
 
+Current code status:
+
+- macOS text pasteboard read/write is implemented in `airpaste-agent`.
+- macOS file pasteboard read/write is implemented for regular file URLs.
+- macOS remote paste hotkey is implemented as `Cmd+Shift+V`; it downloads pending remote files and writes them to the pasteboard.
+- macOS paste simulation is still intentionally out of scope.
+- The macOS agent can publish local text clips, apply remote text clips, publish file manifests, download remote files, write downloaded files back to the macOS pasteboard, and trigger pending file apply through the remote paste hotkey.
+
 ## Suggested Implementation Shape
 
 Keep the current `airpaste-agent` crate.
@@ -194,6 +202,76 @@ cargo run -p airpaste-agent -- \
   --device-name "Mac A"
 ```
 
+For a text-only local smoke, use separate terminal sessions:
+
+```bash
+cargo run -p airpaste-server -- \
+  --bind 127.0.0.1:18081 \
+  --db /tmp/airpaste-macos-agent-smoke.redb
+```
+
+```bash
+cargo run -p airpaste-agent -- \
+  --server-url http://127.0.0.1:18081 \
+  --state-path /tmp/airpaste-macos-agent-a.json \
+  --device-name "Mac Smoke A" \
+  --peer-bind 127.0.0.1:17391 \
+  --cache-dir /tmp/airpaste-macos-cache-a \
+  --remote-paste-hotkey=false \
+  --poll-ms 250
+```
+
+Then publish a local text clip:
+
+```bash
+printf 'airpaste mac publish smoke' | pbcopy
+curl -sS http://127.0.0.1:18081/v1/clips/latest
+```
+
+To verify remote apply, run a receiver with `--publish-clipboard=false`, create a text clip through `POST /v1/clips` using a different `source_device_id`, then confirm `pbpaste` returns the injected text.
+
+For a local file smoke, start a receiver with automatic file apply:
+
+```bash
+cargo run -p airpaste-agent -- \
+  --server-url http://127.0.0.1:18081 \
+  --state-path /tmp/airpaste-macos-file-receiver.json \
+  --device-name "Mac File Receiver" \
+  --peer-bind 127.0.0.1:17394 \
+  --cache-dir /tmp/airpaste-macos-file-receiver-cache \
+  --remote-paste-hotkey=false \
+  --publish-clipboard=false \
+  --auto-apply-files=true
+```
+
+Then start a publisher:
+
+```bash
+cargo run -p airpaste-agent -- \
+  --server-url http://127.0.0.1:18081 \
+  --state-path /tmp/airpaste-macos-file-publisher.json \
+  --device-name "Mac File Publisher" \
+  --peer-bind 127.0.0.1:17393 \
+  --peer-public-url http://127.0.0.1:17393 \
+  --cache-dir /tmp/airpaste-macos-file-publisher-cache \
+  --remote-paste-hotkey=false \
+  --poll-ms 250
+```
+
+Put a file URL on the pasteboard and check the receiver cache:
+
+```bash
+printf 'airpaste mac file smoke' > /tmp/airpaste-macos-file-source.txt
+osascript -e 'set the clipboard to POSIX file "/tmp/airpaste-macos-file-source.txt"'
+curl -sS http://127.0.0.1:18081/v1/clips/latest
+find /tmp/airpaste-macos-file-receiver-cache -maxdepth 3 -type f -print
+osascript -e 'clipboard info'
+```
+
+When testing two macOS agents on the same Mac, stop the publisher after the first file manifest appears. Both agents share one system pasteboard, so the receiver writing downloaded file URLs can otherwise be observed by the publisher as another local file copy.
+
+For a hotkey smoke, start the receiver without `--auto-apply-files=true`, publish a file manifest, then press `Cmd+Shift+V` manually. The receiver should download the file into its cache and write the downloaded file URL to the pasteboard. Scripted key injection through `osascript` may fail with macOS privacy error 1002 unless the calling process has permission to send keystrokes; that permission is not required for the agent to register the Carbon global hotkey.
+
 Pair a second agent/device:
 
 1. Create a pair code with `POST /v1/pair/start`.
@@ -239,4 +317,3 @@ After text works:
 3. Add `Cmd+Shift+V` hotkey.
 4. Add paste simulation and permission handling.
 5. Add LaunchAgent/login item.
-

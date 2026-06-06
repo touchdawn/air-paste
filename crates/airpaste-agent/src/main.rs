@@ -11,7 +11,7 @@ use crate::{
     client::ServerClient,
     clipboard::Clipboard,
     config::Args,
-    hotkey::spawn_remote_paste_listener,
+    hotkey::{spawn_remote_paste_listener, REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY},
     identity::DeviceIdentity,
     paste::PasteSimulator,
     peer::{run_peer_server, PeerFileRegistry},
@@ -434,6 +434,7 @@ async fn run_ws(
                 let hotkey_identity = identity.clone();
                 let hotkey_file_policy = file_policy.clone();
                 let hotkey_cache_dir = cache_dir.clone();
+                let paste_after_hotkey = REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY;
                 tokio::spawn(async move {
                     while hotkey_rx.recv().await.is_some() {
                         if let Err(error) = apply_pending_file_clip(
@@ -445,7 +446,7 @@ async fn run_ws(
                             &hotkey_paste,
                             &hotkey_identity,
                             &hotkey_file_policy,
-                            true,
+                            paste_after_hotkey,
                             &hotkey_cache_dir,
                         )
                         .await

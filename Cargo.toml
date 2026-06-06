@@ -14,10 +14,12 @@ repository = "https://example.invalid/air-paste"
 
 [workspace.dependencies]
 anyhow = "1"
+arboard = { version = "3.6.1", default-features = false }
 axum = { version = "0.7", features = ["ws"] }
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+core-foundation-sys = "0.8"
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-util = "0.3"

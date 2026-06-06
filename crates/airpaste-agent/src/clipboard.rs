@@ -1,13 +1,19 @@
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 #[cfg(windows)]
 pub use windows::Clipboard;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub use macos::Clipboard;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct Clipboard;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Clipboard {
     pub fn new() -> Self {
         Self
