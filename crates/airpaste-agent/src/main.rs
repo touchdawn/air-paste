@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let client = ServerClient::new(args.server_url.clone(), auth_token)?;
     let auto_apply_files = args.auto_apply_files;
     let auto_paste_files = args.auto_paste_files;
+    let text_clip_ttl_secs = args.text_clip_ttl_secs;
     let transfer_token_ttl_secs = args.transfer_token_ttl_secs.max(1);
     let file_policy = FileTransferPolicy {
         max_file_count: args.max_file_count,
@@ -167,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
                     scheme: "mvp-inline-placeholder".to_string(),
                     key_wrapped_for: vec![device_id.clone()],
                 },
+                text_clip_expires_at(text_clip_ttl_secs),
             )
             .await
             .context("failed to publish text clip")?;
@@ -216,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
             peer_registry,
             peer_public_url,
             file_policy.clone(),
+            text_clip_ttl_secs,
             Duration::from_millis(args.poll_ms),
         ))
     } else {
@@ -295,6 +298,7 @@ async fn poll_clipboard(
     peer_registry: PeerFileRegistry,
     peer_public_url: String,
     file_policy: FileTransferPolicy,
+    text_clip_ttl_secs: u64,
     interval: Duration,
 ) -> anyhow::Result<()> {
     let mut last_seen = clipboard.get_text().unwrap_or_default();
@@ -374,6 +378,7 @@ async fn poll_clipboard(
                     scheme: "mvp-inline-placeholder".to_string(),
                     key_wrapped_for: vec![device_id.clone()],
                 },
+                text_clip_expires_at(text_clip_ttl_secs),
             )
             .await?;
         tracing::info!(clip_id = %response.clip_id, "published text clip");
@@ -480,6 +485,7 @@ async fn publish_file_manifest(
                 scheme: "mvp-manifest-placeholder".to_string(),
                 key_wrapped_for: vec![device_id.clone()],
             },
+            None,
         )
         .await?;
     tracing::info!(
@@ -491,6 +497,14 @@ async fn publish_file_manifest(
     peer_registry.bind_clip_id(&transfer_token, response.clip_id)?;
 
     Ok(())
+}
+
+fn text_clip_expires_at(ttl_secs: u64) -> Option<airpaste_core::Timestamp> {
+    if ttl_secs == 0 {
+        None
+    } else {
+        Some(airpaste_core::now() + ChronoDuration::seconds(ttl_secs.min(i64::MAX as u64) as i64))
+    }
 }
 
 async fn trusted_device_public_keys(

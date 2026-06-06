@@ -123,6 +123,9 @@ try {
     if ($latest.kind.text.encrypted_inline_body -ne $publishText) {
         throw "publish smoke failed"
     }
+    if (!$latest.expires_at) {
+        throw "publish smoke failed: text clip did not include expires_at"
+    }
 
     Write-Host "Apply path"
     $applierPair = New-PairCode

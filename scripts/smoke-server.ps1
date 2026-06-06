@@ -127,7 +127,19 @@ $clip = Invoke-AgentOneShot $trustedState @("--publish-text-once", "hello smoke"
 $clip | ConvertTo-Json -Depth 20
 
 Write-Host "Latest clip"
-Invoke-AgentOneShot $untrustedState @("--print-latest-clip") | ConvertTo-Json -Depth 20
+$latestClip = Invoke-AgentOneShot $untrustedState @("--print-latest-clip")
+$latestClip | ConvertTo-Json -Depth 20
+if (!$latestClip.expires_at) {
+    throw "text clip ttl smoke failed: latest text clip did not include expires_at"
+}
+
+Write-Host "Text TTL guard"
+$shortTtlClip = Invoke-AgentOneShot $trustedState @("--publish-text-once", "short ttl smoke", "--text-clip-ttl-secs", "1")
+Start-Sleep -Seconds 2
+$latestAfterTtl = Invoke-AgentOneShot $untrustedState @("--print-latest-clip")
+if ($latestAfterTtl.clip_id -eq $shortTtlClip.clip_id) {
+    throw "text ttl smoke failed: expired text clip was still latest"
+}
 
 Write-Host "Replay guard"
 Invoke-AgentOneShot $trustedState @("--replay-latest-clip-signature") | ConvertTo-Json -Depth 20

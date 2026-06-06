@@ -82,6 +82,7 @@ Current agent scope:
 - MVP file payload download from source agent peer HTTP service into receiver cache.
 - Downloaded files are written back to the system clipboard as a file drop list.
 - Windows remote file paste hotkey: `Ctrl+Shift+V`.
+- Text clips published by the agent default to a 600-second server-side TTL. Use `--text-clip-ttl-secs 0` to disable text expiry for debugging.
 
 File transfer MVP notes:
 

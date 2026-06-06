@@ -130,20 +130,30 @@ impl Store {
         if clip.clip_id.as_str().is_empty() {
             clip.clip_id = ClipId::new();
         }
+        self.cleanup_expired_clips()?;
         self.put(CLIPS, clip.clip_id.as_str(), &clip)?;
         Ok(clip)
     }
 
     pub fn get_clip(&self, clip_id: &ClipId) -> StoreResult<Option<ClipRecord>> {
-        self.get(CLIPS, clip_id.as_str())
+        let Some(clip) = self.get::<ClipRecord>(CLIPS, clip_id.as_str())? else {
+            return Ok(None);
+        };
+        if clip_is_expired(&clip) {
+            self.delete_clip(clip_id)?;
+            return Ok(None);
+        }
+        Ok(Some(clip))
     }
 
     pub fn latest_clip(&self) -> StoreResult<Option<ClipRecord>> {
+        self.cleanup_expired_clips()?;
         let clips = self.list::<ClipRecord>(CLIPS)?;
         Ok(clips.into_iter().max_by_key(|clip| clip.created_at))
     }
 
     pub fn clip_history(&self, limit: usize) -> StoreResult<Vec<ClipRecord>> {
+        self.cleanup_expired_clips()?;
         let mut clips = self.list::<ClipRecord>(CLIPS)?;
         clips.sort_by_key(|clip| std::cmp::Reverse(clip.created_at));
         clips.truncate(limit);
@@ -225,10 +235,41 @@ impl Store {
         }
         Ok(values)
     }
+
+    fn cleanup_expired_clips(&self) -> StoreResult<()> {
+        let now = now();
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(CLIPS)?;
+            let mut expired = Vec::new();
+            for item in table.iter()? {
+                let (key, value) = item?;
+                let clip: ClipRecord = serde_json::from_slice(value.value())?;
+                if clip
+                    .expires_at
+                    .as_ref()
+                    .is_some_and(|expires_at| expires_at <= &now)
+                {
+                    expired.push(key.value().to_string());
+                }
+            }
+            for key in expired {
+                table.remove(key.as_str())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
 }
 
 impl From<redb::DatabaseError> for StoreError {
     fn from(value: redb::DatabaseError) -> Self {
         StoreError::Redb(value.into())
     }
+}
+
+fn clip_is_expired(clip: &ClipRecord) -> bool {
+    clip.expires_at
+        .as_ref()
+        .is_some_and(|expires_at| expires_at <= &now())
 }

@@ -61,6 +61,9 @@ pub struct Args {
     #[arg(long, env = "AIRPASTE_POLL_MS", default_value_t = 750)]
     pub poll_ms: u64,
 
+    #[arg(long, env = "AIRPASTE_TEXT_CLIP_TTL_SECS", default_value_t = 600)]
+    pub text_clip_ttl_secs: u64,
+
     #[arg(long, env = "AIRPASTE_PEER_BIND", default_value = "127.0.0.1:17390")]
     pub peer_bind: SocketAddr,
 

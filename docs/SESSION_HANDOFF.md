@@ -100,6 +100,7 @@ Pairing/trust:
 - Pairing code creation is still API-only through `POST /v1/pair/start`, but that route now requires a trusted request device.
 - Untrusted devices may register and confirm pairing, but cannot list devices, create/read clips, list history, open WebSocket sync, or create relay sessions until trusted.
 - `POST /v1/devices` registration and `POST /v1/pair/confirm` remain usable by untrusted devices.
+- Clip `GET`/latest/history queries ignore expired clips. The store prunes expired clips opportunistically on clip creation and read paths.
 
 ## Current Desktop Agent Behavior
 
@@ -115,6 +116,7 @@ The agent:
 - Reuses the saved private key on later runs.
 - Can confirm pairing with `--pair-code <code>`.
 - Publishes and applies text clipboard clips.
+- Gives text clips a default 600-second `expires_at`; use `--text-clip-ttl-secs 0` to publish non-expiring text clips for debugging.
 - Publishes file clipboard manifests from Windows `CF_HDROP` and macOS file URLs.
 - Runs a peer HTTP server on `--peer-bind`, default `127.0.0.1:17390`.
 - Receives remote file manifests and records them as pending by default.
@@ -136,6 +138,7 @@ Useful agent flags:
 - `--peer-bind`
 - `--peer-public-url`
 - `--cache-dir`
+- `--text-clip-ttl-secs`
 - `--max-file-count`
 - `--max-single-file-bytes`
 - `--max-total-file-bytes`
@@ -235,7 +238,7 @@ Current text sync is functionally useful but security-weak.
 
 Options:
 
-- Temporarily gate text history behind config and short TTL.
+- Build on the current short text clip TTL with a stricter history gate.
 - Add local sensitive-text filters.
 - Add real E2EE content encryption using trusted device public keys.
 

@@ -1,6 +1,7 @@
 use crate::identity::{DeviceIdentity, PEER_FILE_SIGNATURE_ALG};
 use airpaste_core::{
-    ClipId, ClipKind, ClipRecord, Device, DeviceId, EncryptionInfo, PairingCode, TransferToken,
+    ClipId, ClipKind, ClipRecord, Device, DeviceId, EncryptionInfo, PairingCode, Timestamp,
+    TransferToken,
 };
 use airpaste_protocol::{
     rest_body_sha256_base64url, ConfirmPairingRequest, ConfirmPairingResponse, CreateClipRequest,
@@ -169,10 +170,11 @@ impl ServerClient {
         source_device_id: DeviceId,
         kind: ClipKind,
         encryption: EncryptionInfo,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<CreateClipResponse> {
         let request = CreateClipRequest {
             source_device_id,
-            expires_at: None,
+            expires_at,
             kind,
             encryption,
         };
