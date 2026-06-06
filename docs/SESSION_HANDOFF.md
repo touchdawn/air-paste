@@ -143,6 +143,7 @@ GET /v1/files/{transfer_token}/{index}
 Requester-side behavior:
 
 - Downloads from `source_peer_url`.
+- Verifies each downloaded file byte count matches the manifest `FileEntry.size` before writing it into the local cache.
 - Adds these peer request headers:
   - `x-airpaste-clip-id`
   - `x-airpaste-source-device-id`
@@ -183,7 +184,7 @@ Transfer:
 - Peer file server streams file responses from disk instead of buffering entire files in memory.
 - Directories are represented in the manifest but skipped by transfer.
 - There is no recursive directory copy.
-- There is no resume, chunking, checksum validation, or transfer progress.
+- There is no resume, chunking, cryptographic checksum validation, or transfer progress.
 - There is no mDNS/LAN discovery yet.
 - Relay session metadata exists, but the relay data path is not implemented.
 
@@ -210,7 +211,7 @@ Options:
 Useful incremental improvements:
 
 - Add max single-file size.
-- Add SHA-256 while streaming, or at least optional post-download size verification.
+- Add SHA-256 while streaming.
 - Add directory walking with file count and total-size caps.
 
 ### 3. Start macOS Agent

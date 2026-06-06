@@ -799,6 +799,15 @@ async fn download_remote_files(
                 identity,
             )
             .await?;
+        let downloaded_size = bytes.len() as u64;
+        if downloaded_size != entry.size {
+            bail!(
+                "remote file size mismatch for {}: manifest declared {} bytes, downloaded {} bytes",
+                entry.relative_path,
+                entry.size,
+                downloaded_size
+            );
+        }
         let destination = safe_cache_path(&clip_cache_dir, &entry.display_name);
         tokio::fs::write(&destination, bytes).await?;
         tracing::info!(path = %destination.display(), "downloaded remote file");
