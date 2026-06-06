@@ -1,0 +1,7 @@
+/target/
+*.redb
+*.redb-*
+.airpaste-agent*.json
+rustup-init.exe
+vs_BuildTools.exe
+/tools/

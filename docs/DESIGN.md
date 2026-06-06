@@ -14,6 +14,7 @@ The implementation language is Rust. Platform-specific clipboard and desktop int
 - Prefer LAN discovery and direct device-to-device transfer.
 - Use the public server as a control plane for pairing, device presence, signaling, clipboard metadata, and optional text history.
 - Avoid storing file payloads on the server by default.
+- Provide an end-to-end encrypted stream relay fallback for networks where direct peer transfer cannot be established.
 - Provide a reliable first version through an explicit remote paste hotkey.
 
 ### Non-Goals For MVP
@@ -22,6 +23,7 @@ The implementation language is Rust. Platform-specific clipboard and desktop int
 - Deep Explorer/Finder extension integration.
 - Multi-user organization management.
 - Mobile support.
+- Full image payload sync before text and file transfer are reliable.
 - Full conflict-free collaborative clipboard editing.
 
 ## 2. Core Architecture
@@ -46,7 +48,7 @@ flowchart LR
     API["Auth / Pairing / Metadata API"]
     Signal["Presence / Signaling"]
     History["Encrypted Text History"]
-    Relay["Optional Encrypted Stream Relay"]
+    Relay["Fallback Encrypted Stream Relay"]
   end
 
   subgraph DeviceB["Device B"]
@@ -65,7 +67,7 @@ flowchart LR
   Relay -. fallback .-> AgentB
 ```
 
-The server should not be the default file transfer path. It coordinates the connection. If direct transfer is impossible, an optional relay can stream encrypted bytes without storing them.
+The server should not be the default file transfer path. It coordinates the connection. If direct transfer is impossible, an optional relay can stream end-to-end encrypted bytes without storing them.
 
 ## 3. Control Plane And Data Plane
 
@@ -95,10 +97,12 @@ The data plane carries real payload data:
 Preferred transfer order:
 
 1. LAN direct connection discovered through mDNS or UDP broadcast.
-2. Known direct address through server-provided candidates.
-3. P2P connection negotiated through signaling.
-4. Optional encrypted stream relay through the server.
+2. Known direct address through server-provided candidates, treated as best-effort.
+3. P2P connection negotiated through signaling, only if the implementation includes an explicit NAT traversal strategy.
+4. Encrypted stream relay through the server as the reliability fallback.
 5. Fail with a clear error if relay is disabled or unavailable.
+
+DDNS makes the server reachable; it does not make two desktop agents mutually reachable. For MVP, the dependable network model is LAN direct transfer plus encrypted relay fallback. Internet P2P across NAT should be considered a later optimization unless the project adopts ICE/STUN/TURN or an equivalent design.
 
 ## 4. MVP User Experience
 
@@ -113,7 +117,7 @@ When device A copies text:
 5. Agent B receives a clipboard update.
 6. Agent B writes the text to its local clipboard, unless the user has disabled auto-apply.
 
-Text can also appear in a small clipboard history UI.
+Text can also appear in a small clipboard history UI, but history should be disabled by default or use a short TTL. Clipboard text often contains passwords, access tokens, verification codes, and private keys.
 
 ### Images
 
@@ -133,7 +137,7 @@ When device A copies files:
 
 1. Agent A detects file clipboard content.
 2. Agent A does not upload file payloads.
-3. Agent A creates a file manifest with names, sizes, hashes if available, and a transfer token.
+3. Agent A creates a file manifest with paths, sizes, modified times, file kinds, and a transfer token. It must not eagerly hash large files or walk beyond configured limits.
 4. Agent A sends the encrypted manifest to the server.
 5. Agent B records that a remote file clipboard is available.
 
@@ -147,6 +151,8 @@ When the user wants to paste on device B:
 6. Agent B simulates a normal paste action into the active application.
 
 This avoids depending on whether the target application reads the clipboard early for preview or validation.
+
+Some applications will still handle file paste differently. If paste simulation fails, is disabled, or lacks OS permissions, Agent B should leave the downloaded files in the cache and expose a fallback action such as opening the cache directory or copying local file paths.
 
 ## 5. Clipboard Model
 
@@ -221,6 +227,8 @@ pub enum FileEntryKind {
 
 For MVP, symlinks can be rejected or copied as plain files only if the behavior is explicit.
 
+`sha256` should be optional metadata, not a required manifest-generation step. For large files and directories, integrity should be verified by streaming hashes during actual transfer rather than blocking clipboard publication.
+
 ## 6. Device Discovery
 
 ### LAN Discovery
@@ -244,7 +252,7 @@ Every agent maintains a WebSocket connection to the server:
 - Heartbeat interval: 15-30 seconds.
 - Server tracks online/offline state.
 - Server forwards clipboard metadata notifications.
-- Server forwards P2P negotiation messages.
+- Server forwards peer and relay negotiation messages.
 
 ## 7. Networking Protocol
 
@@ -279,12 +287,13 @@ Other event types:
 - `transfer.offer`
 - `transfer.answer`
 - `transfer.candidate`
+- `transfer.relay_ready`
 - `transfer.cancelled`
 - `transfer.completed`
 
 ### Peer Protocol
 
-The peer protocol should run over TLS or QUIC with mutual device authentication.
+The peer protocol should run over TLS or QUIC with mutual device authentication. QUIC/TLS provides transport security, but it does not solve NAT traversal by itself.
 
 Initial message:
 
@@ -293,7 +302,9 @@ Initial message:
   "type": "transfer.request",
   "clip_id": "01J...",
   "transfer_token": "short_lived_token",
-  "requested_files": ["."]
+  "requester_device_id": "dev_...",
+  "requested_files": ["."],
+  "request_signature": "base64..."
 }
 ```
 
@@ -309,6 +320,18 @@ Response:
 ```
 
 Data should be chunked, checksummed, resumable where practical, and cancellable.
+
+The transfer token must be one-time use, short-lived, and bound to the clip ID, source device ID, recipient device ID, and transfer route. A token alone must not be enough to retrieve files; the peer must also authenticate the requesting device and verify its signature.
+
+### Relay Protocol
+
+The relay is a fallback data path, not file storage:
+
+- The server creates an authorized relay session for a specific source device, recipient device, and clip ID.
+- Both agents connect to the relay session over authenticated TLS/WebSocket or QUIC streams.
+- The source agent encrypts payload chunks end-to-end for the recipient before sending them through the relay.
+- The server enforces TTL, maximum bytes, bandwidth limits, and cancellation.
+- The server does not decrypt, index, preview, or persist file payload bytes.
 
 ## 8. Security Model
 
@@ -329,13 +352,14 @@ The server stores public device keys only.
 
 Pairing flow:
 
-1. Existing device or server creates a short pairing code or QR payload.
+1. Existing trusted device creates a short pairing code or QR payload.
 2. New device submits the pairing payload.
-3. Existing trusted device confirms the new device.
-4. Both devices store each other's public identity keys.
-5. Server marks the device as trusted.
+3. Existing trusted device confirms the new device identity key, preferably with a visible fingerprint.
+4. Existing trusted device signs or approves the new device key.
+5. Both devices store each other's public identity keys.
+6. Server records the trusted device relationship.
 
-For a personal-only MVP, a server-side invite code can be accepted as a temporary shortcut, but the design should not depend on passwords alone.
+For a personal-only MVP, a server-side invite code can be accepted as a temporary registration shortcut, but it must not be the final trust root. The server can help a device join the account or group; an existing trusted device should still approve the new device key before it can read clipboard content or request file transfers.
 
 ### Encryption
 
@@ -363,7 +387,7 @@ Text history should be opt-in or conservative by default. Add local filters for:
 - Credit card-like strings.
 - Very large text blobs.
 
-Filtering should prefer false negatives over breaking normal clipboard behavior, but the UI must allow easy deletion and history disablement.
+For history storage, filtering should prefer false positives over leaks: it is better to skip storing a suspicious clip than to keep a secret. Live clipboard sync may be less aggressive to avoid breaking normal clipboard behavior, but history recording should be conservative and easy to disable.
 
 ## 9. Platform Integration
 
@@ -666,19 +690,21 @@ name = "Workstation"
 
 [clipboard]
 sync_text = true
-sync_images = true
+sync_images = false
 sync_files = true
 auto_apply_text = true
 auto_apply_images = false
-save_text_history = true
-text_history_ttl_hours = 24
+save_text_history = false
+text_history_ttl_minutes = 10
 
 [transfer]
 prefer_lan = true
-enable_p2p = true
+enable_internet_p2p = false
 enable_relay = true
 max_file_count = 10000
 max_total_size_mb = 10240
+relay_max_size_mb = 2048
+relay_session_ttl_minutes = 30
 cache_ttl_hours = 24
 cache_max_size_mb = 20480
 
@@ -729,6 +755,7 @@ The UI should expose a simple diagnostics page with:
 - Generate device identity.
 - Register device with server.
 - Implement pairing code flow.
+- Require existing trusted-device approval before a new device can decrypt clips or request transfers.
 - Maintain WebSocket heartbeat.
 - Show known online devices.
 
@@ -738,7 +765,7 @@ The UI should expose a simple diagnostics page with:
 - Implement macOS text clipboard watcher/writer.
 - Publish encrypted text clips.
 - Receive and apply remote text clips.
-- Add simple text history with TTL.
+- Add optional text history with conservative filtering and short TTL.
 
 ### Phase 4: File Manifest Sync
 
@@ -747,23 +774,31 @@ The UI should expose a simple diagnostics page with:
 - Publish manifest only.
 - Show remote file clipboard availability.
 
-### Phase 5: Direct File Transfer
+### Phase 5: Reliable File Transfer MVP
 
 - Implement peer listener.
-- Implement LAN discovery.
-- Implement direct transfer by clip ID and transfer token.
+- Implement LAN discovery and direct LAN transfer.
+- Implement minimal encrypted stream relay fallback.
+- Implement transfer authorization by clip ID, source device, recipient device, and one-time token.
 - Download to local cache.
 - Write local file references to clipboard.
 - Implement remote paste hotkey.
+- Provide fallback action when paste simulation is unavailable or fails.
 
-### Phase 6: Relay Fallback
+### Phase 6: Image Sync
 
-- Add server relay session negotiation.
-- Stream encrypted chunks through server.
-- Add relay policy setting.
-- Add bandwidth and size limits.
+- Implement image manifest and payload handling.
+- Allow small encrypted image payloads through server only if configured.
+- Transfer larger images through direct LAN or relay.
+- Decide whether images auto-apply to clipboard or wait for explicit user action.
 
-### Phase 7: UI And Packaging
+### Phase 7: Internet P2P Optimization
+
+- Evaluate ICE/STUN/TURN or another explicit NAT traversal strategy.
+- Add internet P2P only if it improves reliability without weakening authorization.
+- Keep relay as the dependable fallback.
+
+### Phase 8: UI And Packaging
 
 - Build Tauri UI.
 - Add tray/menu bar integration.
@@ -788,16 +823,16 @@ The UI should expose a simple diagnostics page with:
 - Rust is the implementation language.
 - Server is primarily a control plane.
 - File payloads are not stored on the server by default.
-- Optional relay is stream-only and encrypted.
+- Relay is stream-only, end-to-end encrypted, and available as the MVP reliability fallback.
 - MVP uses explicit remote paste hotkey for files.
-- Text history exists but should be encrypted and easy to disable.
+- Text history is optional, encrypted, conservative, and disabled by default.
 
 ## 20. Open Questions
 
 - Should the first server version require user accounts, or only a private deployment token?
-- Should text history be enabled by default or opt-in?
 - What is the default maximum file size for remote paste?
+- What is the default maximum relay transfer size?
 - Should images auto-apply to clipboard or wait for explicit user action?
-- Is relay allowed on the user's DDNS Windows server, or should relay be disabled for the earliest version?
+- Is relay allowed on the user's DDNS Windows server for files up to the configured relay size limit?
 - Should the agent support multiple clipboard channels later, such as personal/work profiles?
 
