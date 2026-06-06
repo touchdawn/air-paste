@@ -4,11 +4,15 @@ use airpaste_core::{
 };
 use airpaste_protocol::{
     ConfirmPairingRequest, ConfirmPairingResponse, CreateClipRequest, CreateClipResponse,
-    RegisterDeviceRequest, RegisterDeviceResponse,
+    RegisterDeviceRequest, RegisterDeviceResponse, AIRPASTE_DEVICE_ID_HEADER,
 };
 use anyhow::Context;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::{
-    client::IntoClientRequest, handshake::client::Request, http::header::AUTHORIZATION,
+    client::IntoClientRequest,
+    handshake::client::Request,
+    http::header::{HeaderName, HeaderValue, AUTHORIZATION},
 };
 
 #[derive(Clone)]
@@ -16,6 +20,7 @@ pub struct ServerClient {
     base_url: String,
     ws_url: String,
     auth_token: Option<String>,
+    request_device_id: Arc<RwLock<Option<DeviceId>>>,
     http: reqwest::Client,
 }
 
@@ -34,11 +39,16 @@ impl ServerClient {
             base_url,
             ws_url,
             auth_token,
+            request_device_id: Arc::new(RwLock::new(None)),
             http: reqwest::Client::new(),
         })
     }
 
-    pub fn ws_request(&self) -> anyhow::Result<Request> {
+    pub async fn set_request_device_id(&self, device_id: DeviceId) {
+        *self.request_device_id.write().await = Some(device_id);
+    }
+
+    pub async fn ws_request(&self) -> anyhow::Result<Request> {
         let mut request = self.ws_url.as_str().into_client_request()?;
         if let Some(token) = &self.auth_token {
             request.headers_mut().insert(
@@ -46,6 +56,13 @@ impl ServerClient {
                 format!("Bearer {token}")
                     .parse()
                     .context("invalid auth token header value")?,
+            );
+        }
+        if let Some(device_id) = self.request_device_id.read().await.as_ref() {
+            request.headers_mut().insert(
+                HeaderName::from_static(AIRPASTE_DEVICE_ID_HEADER),
+                HeaderValue::from_str(device_id.as_str())
+                    .context("invalid device id header value")?,
             );
         }
         Ok(request)
@@ -68,7 +85,8 @@ impl ServerClient {
     }
 
     pub async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
-        self.authorized(self.http.get(format!("{}/v1/devices", self.base_url)))
+        self.authenticated_device(self.http.get(format!("{}/v1/devices", self.base_url)))
+            .await?
             .send()
             .await?
             .error_for_status()?
@@ -103,7 +121,8 @@ impl ServerClient {
         kind: ClipKind,
         encryption: EncryptionInfo,
     ) -> anyhow::Result<CreateClipResponse> {
-        self.authorized(self.http.post(format!("{}/v1/clips", self.base_url)))
+        self.authenticated_device(self.http.post(format!("{}/v1/clips", self.base_url)))
+            .await?
             .json(&CreateClipRequest {
                 source_device_id,
                 expires_at: None,
@@ -119,10 +138,12 @@ impl ServerClient {
     }
 
     pub async fn get_clip(&self, clip_id: ClipId) -> anyhow::Result<ClipRecord> {
-        self.authorized(
-            self.http
-                .get(format!("{}/v1/clips/{}", self.base_url, clip_id.as_str())),
-        )
+        self.authenticated_device(self.http.get(format!(
+            "{}/v1/clips/{}",
+            self.base_url,
+            clip_id.as_str()
+        )))
+        .await?
         .send()
         .await?
         .error_for_status()?
@@ -172,6 +193,18 @@ impl ServerClient {
         } else {
             request
         }
+    }
+
+    async fn authenticated_device(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> anyhow::Result<reqwest::RequestBuilder> {
+        let Some(device_id) = self.request_device_id.read().await.clone() else {
+            anyhow::bail!("server request requires registered device id");
+        };
+        Ok(self
+            .authorized(request)
+            .header(AIRPASTE_DEVICE_ID_HEADER, device_id.as_str()))
     }
 }
 

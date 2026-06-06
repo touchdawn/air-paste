@@ -1,15 +1,15 @@
 use crate::{state::AppState, store::StoreError, ws::ws_handler};
-use airpaste_core::{now, ClipId, ClipRecord};
+use airpaste_core::{now, ClipId, ClipRecord, Device, DeviceId};
 use airpaste_protocol::{
     ClipSummary, ConfirmPairingRequest, ConfirmPairingResponse, CreateClipRequest,
     CreateClipResponse, CreateRelaySessionRequest, CreateRelaySessionResponse, HealthResponse,
     RegisterDeviceRequest, RegisterDeviceResponse, ServerEvent, StartPairingRequest,
-    StartPairingResponse,
+    StartPairingResponse, AIRPASTE_DEVICE_ID_HEADER,
 };
 use axum::{
     body::Body,
-    extract::{Path, Query, State, WebSocketUpgrade},
-    http::{header::AUTHORIZATION, HeaderMap, Request, StatusCode},
+    extract::{FromRequestParts, Path, Query, State, WebSocketUpgrade},
+    http::{header::AUTHORIZATION, request::Parts, HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -56,17 +56,26 @@ async fn register_device(
 
 async fn list_devices(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
 ) -> ApiResult<Json<Vec<airpaste_core::Device>>> {
     Ok(Json(state.store.list_devices().map_err(ApiError::from)?))
 }
 
 async fn start_pairing(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
     Json(request): Json<StartPairingRequest>,
 ) -> ApiResult<Json<StartPairingResponse>> {
+    if let Some(created_by) = &request.created_by {
+        if created_by != &request_device.device_id {
+            return Err(ApiError::forbidden(
+                "pairing creator must match request device",
+            ));
+        }
+    }
     let session = state
         .store
-        .start_pairing(request.created_by, request.ttl_seconds)
+        .start_pairing(Some(request_device.device_id), request.ttl_seconds)
         .map_err(ApiError::from)?;
     Ok(Json(StartPairingResponse {
         code: session.code,
@@ -90,8 +99,14 @@ async fn confirm_pairing(
 
 async fn create_clip(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
     Json(request): Json<CreateClipRequest>,
 ) -> ApiResult<Json<CreateClipResponse>> {
+    if request.source_device_id != request_device.device_id {
+        return Err(ApiError::forbidden(
+            "clip source device must match request device",
+        ));
+    }
     let clip = ClipRecord {
         clip_id: ClipId::new(),
         source_device_id: request.source_device_id,
@@ -115,6 +130,7 @@ async fn create_clip(
 
 async fn get_clip(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
     Path(clip_id): Path<String>,
 ) -> ApiResult<Json<ClipRecord>> {
     let clip_id = ClipId::from(clip_id);
@@ -126,7 +142,10 @@ async fn get_clip(
         .ok_or(ApiError::not_found("clip not found"))
 }
 
-async fn latest_clip(State(state): State<Arc<AppState>>) -> ApiResult<Json<Option<ClipRecord>>> {
+async fn latest_clip(
+    State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
+) -> ApiResult<Json<Option<ClipRecord>>> {
     Ok(Json(state.store.latest_clip().map_err(ApiError::from)?))
 }
 
@@ -137,6 +156,7 @@ struct HistoryQuery {
 
 async fn clip_history(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
     Query(query): Query<HistoryQuery>,
 ) -> ApiResult<Json<Vec<ClipSummary>>> {
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
@@ -146,6 +166,7 @@ async fn clip_history(
 
 async fn delete_clip(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
     Path(clip_id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let removed = state
@@ -161,8 +182,19 @@ async fn delete_clip(
 
 async fn create_relay_session(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
     Json(request): Json<CreateRelaySessionRequest>,
 ) -> ApiResult<Json<CreateRelaySessionResponse>> {
+    if request.source_device_id != request_device.device_id
+        && request.recipient_device_id != request_device.device_id
+    {
+        return Err(ApiError::forbidden(
+            "relay requester must be the source or recipient device",
+        ));
+    }
+    ensure_trusted_device(&state, &request.source_device_id)?;
+    ensure_trusted_device(&state, &request.recipient_device_id)?;
+
     let relay = state
         .store
         .create_relay_session(
@@ -189,8 +221,12 @@ async fn create_relay_session(
     Ok(Json(CreateRelaySessionResponse { relay }))
 }
 
-async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| ws_handler(socket, state))
+async fn ws_upgrade(
+    State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| ws_handler(socket, state, request_device.device_id))
 }
 
 async fn require_auth(
@@ -242,6 +278,50 @@ fn clip_summary(value: ClipRecord) -> ClipSummary {
 
 type ApiResult<T> = Result<T, ApiError>;
 
+struct TrustedDevice(Device);
+
+#[axum::async_trait]
+impl FromRequestParts<Arc<AppState>> for TrustedDevice {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let device_id = parts
+            .headers
+            .get(AIRPASTE_DEVICE_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| DeviceId::from(value.to_string()))
+            .ok_or_else(|| ApiError::unauthorized("missing Air Paste device id header"))?;
+
+        let device = state
+            .store
+            .get_device(&device_id)
+            .map_err(ApiError::from)?
+            .ok_or_else(|| ApiError::unauthorized("device is not registered"))?;
+        if !device.trusted {
+            return Err(ApiError::forbidden("device is not trusted"));
+        }
+
+        Ok(Self(device))
+    }
+}
+
+fn ensure_trusted_device(state: &AppState, device_id: &DeviceId) -> ApiResult<Device> {
+    let device = state
+        .store
+        .get_device(device_id)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::not_found("device not found"))?;
+    if !device.trusted {
+        return Err(ApiError::forbidden("device is not trusted"));
+    }
+    Ok(device)
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -259,6 +339,13 @@ impl ApiError {
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
         }
     }

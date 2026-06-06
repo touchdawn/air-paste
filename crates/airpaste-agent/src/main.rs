@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         identity.public_key_base64(),
     )
     .await?;
+    client.set_request_device_id(device_id.clone()).await;
     if let Some(pair_code) = args
         .pair_code
         .clone()
@@ -500,7 +501,7 @@ async fn run_ws_once(
     auto_paste_files: bool,
     cache_dir: &Path,
 ) -> anyhow::Result<()> {
-    let (ws, _) = tokio_tungstenite::connect_async(client.ws_request()?).await?;
+    let (ws, _) = tokio_tungstenite::connect_async(client.ws_request().await?).await?;
     let (mut writer, mut reader) = ws.split();
     writer
         .send(Message::Text(serde_json::to_string(

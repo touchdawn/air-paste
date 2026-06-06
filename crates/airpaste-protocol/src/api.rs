@@ -3,6 +3,8 @@ use airpaste_core::{
 };
 use serde::{Deserialize, Serialize};
 
+pub const AIRPASTE_DEVICE_ID_HEADER: &str = "x-airpaste-device-id";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,

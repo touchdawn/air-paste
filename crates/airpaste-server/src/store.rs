@@ -80,6 +80,10 @@ impl Store {
         Ok(device)
     }
 
+    pub fn get_device(&self, device_id: &DeviceId) -> StoreResult<Option<Device>> {
+        self.get(DEVICES, device_id.as_str())
+    }
+
     pub fn touch_device(&self, device_id: &DeviceId) -> StoreResult<Option<Device>> {
         let Some(mut device) = self.get::<Device>(DEVICES, device_id.as_str())? else {
             return Ok(None);

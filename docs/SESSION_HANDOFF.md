@@ -73,13 +73,16 @@ Auth:
 - `--auth-token <secret>` or `AIRPASTE_AUTH_TOKEN=<secret>` enables Bearer-token protection.
 - `/health` and `/v1/health` stay public.
 - Other REST and WebSocket routes require `Authorization: Bearer <secret>`.
+- Sensitive REST routes and WebSocket upgrade also require `x-airpaste-device-id` for a registered trusted device.
 
 Pairing/trust:
 
 - The first registered device in a fresh DB is automatically trusted for bootstrap.
 - Later devices register as untrusted.
 - A non-first agent can confirm pairing by starting with `--pair-code <code>`.
-- Pairing code creation is still API-only through `POST /v1/pair/start`.
+- Pairing code creation is still API-only through `POST /v1/pair/start`, but that route now requires a trusted request device.
+- Untrusted devices may register and confirm pairing, but cannot list devices, create/read clips, list history, open WebSocket sync, or create relay sessions until trusted.
+- The MVP request identity is the `x-airpaste-device-id` header. Sensitive REST calls are not yet signed by the device key.
 
 ## Current Windows Agent Behavior
 
@@ -159,6 +162,7 @@ Smoke coverage:
 - File peer download.
 - Local file clipboard write.
 - Server auth token path.
+- Trusted-device API guard path: missing device header returns `401`, untrusted device returns `403`, paired device is allowed.
 - Peer unauthenticated request returns `401`.
 - Repeated file index download returns `410`.
 
@@ -168,8 +172,7 @@ Security and trust:
 
 - Text clips are still inline plaintext placeholders, not real end-to-end encrypted payloads.
 - The server can still store and return plaintext text clips.
-- Server API permission checks are not yet narrowed by trusted device status. This should be the next server-side hardening step.
-- Pairing code creation is not yet tied to an authenticated trusted device beyond the deployment token.
+- Server trusted-device checks currently trust the `x-airpaste-device-id` header after Bearer auth. Sensitive REST calls still need Ed25519 request signing as a stronger follow-up.
 - There is no UI fingerprint comparison for device public keys.
 
 Transfer:
@@ -189,26 +192,16 @@ Platform:
 
 ## Recommended Next Steps
 
-### 1. Restrict Server APIs By Trust
+### 1. Add Signed REST Request Authentication
 
-This is the highest-priority next step.
+The server now narrows sensitive APIs by trusted device, but the MVP identity mechanism is still a client-supplied `x-airpaste-device-id` header protected only by the deployment Bearer token.
 
-Expected rule:
+Useful next hardening step:
 
-- Untrusted devices may register and confirm pairing.
-- Trusted devices may create clips, read clips, list history, open WebSocket sync, create relay sessions, and participate in file transfer.
-
-Likely implementation:
-
-- Add a request identity mechanism for REST and WebSocket.
-- For MVP, accept a `device_id` field/header and validate that the device exists and is trusted.
-- Better follow-up: require request signing with the agent Ed25519 key for sensitive REST calls too.
-
-Be careful:
-
-- Do not break first-device bootstrap.
-- Do not block `/v1/pair/confirm` for untrusted devices.
-- Smoke tests need a pairing step for any non-first agent that needs file transfer.
+- Sign sensitive REST requests with the agent Ed25519 key.
+- Include method, path, device ID, timestamp/nonce, and a body hash in the signature.
+- Reject stale timestamps and replayed nonces.
+- Keep `/v1/devices` registration and `/v1/pair/confirm` usable for untrusted devices.
 
 ### 2. Make Text Less Dangerous
 
@@ -234,4 +227,3 @@ Useful incremental improvements:
 See `docs/MACOS_AGENT_PLAN.md`.
 
 The best approach is to add macOS implementations behind the existing agent abstractions instead of starting a separate product.
-

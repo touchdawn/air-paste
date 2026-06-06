@@ -196,7 +196,7 @@ cargo run -p airpaste-agent -- \
 
 Pair a second agent/device:
 
-1. Create a pair code with `POST /v1/pair/start`.
+1. Create a pair code with `POST /v1/pair/start` from an already trusted device.
 2. Run the second agent with `--pair-code <code>`.
 
 Cross-platform smoke target:
@@ -239,4 +239,3 @@ After text works:
 3. Add `Cmd+Shift+V` hotkey.
 4. Add paste simulation and permission handling.
 5. Add LaunchAgent/login item.
-
