@@ -134,6 +134,7 @@ Useful agent flags:
 - `--peer-public-url`
 - `--cache-dir`
 - `--max-file-count`
+- `--max-single-file-bytes`
 - `--max-total-file-bytes`
 - `--transfer-token-ttl-secs`
 - `--auto-apply-files=true`
@@ -149,6 +150,8 @@ File payloads do not go through the server in the normal MVP path.
 Source-side behavior:
 
 - Publishes a `FileClip` manifest to the server.
+- Rejects regular files above `--max-single-file-bytes` before publishing a manifest.
+- Adds lowercase hex SHA-256 to manifest entries for regular files.
 - Registers local original file paths under a short-lived `transfer_token`.
 - The token TTL defaults to 600 seconds.
 - Each file index can be downloaded once.
@@ -161,6 +164,10 @@ GET /v1/files/{transfer_token}/{index}
 Requester-side behavior:
 
 - Downloads from `source_peer_url`.
+- Rejects remote file manifests whose regular files exceed `--max-single-file-bytes`.
+- Streams each downloaded file into a temporary cache file.
+- Verifies each downloaded file byte count matches `FileEntry.size` and, when present, its SHA-256 matches `FileEntry.sha256` before renaming it into the local cache.
+- Falls back to size-only verification for old manifests that omit `FileEntry.sha256`, with a warning.
 - Adds these peer request headers:
   - `x-airpaste-clip-id`
   - `x-airpaste-source-device-id`
@@ -181,6 +188,7 @@ Smoke coverage:
 - Text publish/apply.
 - File manifest publish.
 - File peer download.
+- File manifest and downloaded file SHA-256 verification.
 - Local file clipboard write.
 - Server auth token path.
 - macOS scripted text sync.
@@ -190,6 +198,7 @@ Smoke coverage:
 - Trusted-device signed API guard path: missing signature returns `401`, untrusted signed request returns `403`, paired signed request is allowed, replayed nonce returns `401`.
 - Peer unauthenticated request returns `401`.
 - Repeated file index download returns `410`.
+- Single-file size limit rejects oversized local file publication.
 
 ## Important MVP Limitations
 
@@ -202,10 +211,10 @@ Security and trust:
 
 Transfer:
 
-- Peer file server reads each file into memory with `std::fs::read`.
+- Peer file server streams file responses from disk instead of buffering entire files in memory.
 - Directories are represented in the manifest but skipped by transfer.
 - There is no recursive directory copy.
-- There is no resume, chunking, checksum validation, or transfer progress.
+- There is no resume, explicit chunk protocol, or transfer progress.
 - There is no mDNS/LAN discovery yet.
 - Relay session metadata exists, but the relay data path is not implemented.
 
@@ -231,9 +240,6 @@ Options:
 
 Useful incremental improvements:
 
-- Stream files instead of reading them fully into memory.
-- Add max single-file size.
-- Add SHA-256 while streaming, or at least optional post-download size verification.
 - Add directory walking with file count and total-size caps.
 
 ### 3. Continue macOS Agent

@@ -137,7 +137,7 @@ When device A copies files:
 
 1. Agent A detects file clipboard content.
 2. Agent A does not upload file payloads.
-3. Agent A creates a file manifest with paths, sizes, modified times, file kinds, and a transfer token. It must not eagerly hash large files or walk beyond configured limits.
+3. Agent A creates a file manifest with paths, sizes, modified times, file kinds, optional hashes, and a transfer token. It must not eagerly hash files beyond configured limits or walk beyond configured limits.
 4. Agent A sends the encrypted manifest to the server.
 5. Agent B records that a remote file clipboard is available.
 
@@ -229,7 +229,7 @@ pub enum FileEntryKind {
 
 For MVP, symlinks can be rejected or copied as plain files only if the behavior is explicit.
 
-`sha256` should be optional metadata, not a required manifest-generation step. For large files and directories, integrity should be verified by streaming hashes during actual transfer rather than blocking clipboard publication.
+`sha256` should be optional metadata at the protocol level. The current Windows MVP fills it for regular files that pass the configured size limits and verifies it while streaming downloads; older manifests without this field remain size-verified only.
 
 ## 6. Device Discovery
 

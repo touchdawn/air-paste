@@ -15,7 +15,8 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::net::TcpListener;
+use tokio::{fs::File, net::TcpListener};
+use tokio_util::io::ReaderStream;
 
 #[derive(Clone, Default)]
 pub struct PeerFileRegistry {
@@ -174,7 +175,7 @@ async fn download_file(
     headers: HeaderMap,
     Path((token, index)): Path<(String, usize)>,
 ) -> Response {
-    match download_file_inner(registry, headers, &token, index) {
+    match download_file_inner(registry, headers, &token, index).await {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(%error, "peer file download failed");
@@ -183,7 +184,7 @@ async fn download_file(
     }
 }
 
-fn download_file_inner(
+async fn download_file_inner(
     registry: PeerFileRegistry,
     headers: HeaderMap,
     token: &str,
@@ -207,7 +208,7 @@ fn download_file_inner(
             return Ok((StatusCode::UNAUTHORIZED, reason).into_response())
         }
     };
-    let metadata = std::fs::metadata(&path)?;
+    let metadata = tokio::fs::metadata(&path).await?;
     if !metadata.is_file() {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -216,19 +217,20 @@ fn download_file_inner(
             .into_response());
     }
 
-    let body = std::fs::read(&path)?;
+    let file = File::open(&path).await?;
+    let body = Body::from_stream(ReaderStream::new(file));
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("download.bin");
     let response = Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_LENGTH, body.len().to_string())
+        .header(header::CONTENT_LENGTH, metadata.len().to_string())
         .header(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{}\"", filename.replace('"', "")),
         )
-        .body(Body::from(body))?;
+        .body(body)?;
     Ok(response)
 }
 

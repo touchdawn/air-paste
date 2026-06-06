@@ -261,14 +261,14 @@ impl ServerClient {
             .context("failed to decode relay session response")
     }
 
-    pub async fn download_peer_file(
+    pub async fn open_peer_file_download(
         &self,
         url: &str,
         clip_id: &ClipId,
         source_device_id: &DeviceId,
         requester_device_id: &DeviceId,
         identity: &DeviceIdentity,
-    ) -> anyhow::Result<bytes::Bytes> {
+    ) -> anyhow::Result<reqwest::Response> {
         let (transfer_token, index) = peer_file_url_parts(url)?;
         let signature = identity.sign_peer_file_request(
             clip_id,
@@ -278,7 +278,8 @@ impl ServerClient {
             index,
         );
 
-        self.http
+        Ok(self
+            .http
             .get(url)
             .header("x-airpaste-clip-id", clip_id.as_str())
             .header("x-airpaste-source-device-id", source_device_id.as_str())
@@ -290,10 +291,7 @@ impl ServerClient {
             .header("x-airpaste-signature", signature)
             .send()
             .await?
-            .error_for_status()?
-            .bytes()
-            .await
-            .context("failed to download bytes")
+            .error_for_status()?)
     }
 
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

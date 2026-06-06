@@ -11,7 +11,6 @@ airpaste-protocol = { path = "../airpaste-protocol" }
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
-bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
@@ -20,8 +19,10 @@ rand_core.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
