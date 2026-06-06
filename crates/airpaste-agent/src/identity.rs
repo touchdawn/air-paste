@@ -1,4 +1,5 @@
 use airpaste_core::{ClipId, DeviceId, TransferToken};
+use airpaste_protocol::rest_signing_message;
 use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -53,6 +54,26 @@ impl DeviceIdentity {
             requester_device_id.as_str(),
             transfer_token.as_str(),
             index,
+        );
+        STANDARD.encode(self.signing_key.sign(message.as_bytes()).to_bytes())
+    }
+
+    pub fn sign_rest_request(
+        &self,
+        method: &str,
+        path_and_query: &str,
+        device_id: &DeviceId,
+        timestamp: &str,
+        nonce: &str,
+        body_sha256: &str,
+    ) -> String {
+        let message = rest_signing_message(
+            method,
+            path_and_query,
+            device_id,
+            timestamp,
+            nonce,
+            body_sha256,
         );
         STANDARD.encode(self.signing_key.sign(message.as_bytes()).to_bytes())
     }

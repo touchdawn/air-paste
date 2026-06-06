@@ -1,7 +1,11 @@
 use crate::store::Store;
 use airpaste_core::DeviceId;
 use airpaste_protocol::ServerEvent;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::{broadcast, RwLock};
 
 #[derive(Clone)]
@@ -9,6 +13,7 @@ pub struct AppState {
     pub store: Store,
     pub hub: EventHub,
     pub auth_token: Option<String>,
+    nonce_cache: NonceCache,
 }
 
 impl AppState {
@@ -17,7 +22,12 @@ impl AppState {
             store,
             hub: EventHub::new(),
             auth_token,
+            nonce_cache: NonceCache::new(Duration::from_secs(300)),
         }
+    }
+
+    pub async fn record_nonce(&self, device_id: &DeviceId, nonce: &str) -> bool {
+        self.nonce_cache.record(device_id, nonce).await
     }
 }
 
@@ -63,5 +73,32 @@ impl EventHub {
         if let Some(tx) = tx {
             let _ = tx.send(event);
         }
+    }
+}
+
+#[derive(Clone)]
+struct NonceCache {
+    ttl: Duration,
+    entries: Arc<RwLock<HashMap<(DeviceId, String), Instant>>>,
+}
+
+impl NonceCache {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            entries: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    async fn record(&self, device_id: &DeviceId, nonce: &str) -> bool {
+        let now = Instant::now();
+        let mut entries = self.entries.write().await;
+        entries.retain(|_, expires_at| *expires_at > now);
+        let key = (device_id.clone(), nonce.to_string());
+        if entries.contains_key(&key) {
+            return false;
+        }
+        entries.insert(key, now + self.ttl);
+        true
     }
 }

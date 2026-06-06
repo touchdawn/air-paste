@@ -23,7 +23,7 @@ pub struct PeerFileRegistry {
 }
 
 struct PeerFileGrant {
-    clip_id: ClipId,
+    clip_id: Option<ClipId>,
     source_device_id: DeviceId,
     authorized_public_keys: HashMap<DeviceId, String>,
     paths: Vec<PathBuf>,
@@ -51,7 +51,7 @@ impl PeerFileRegistry {
     pub fn register(
         &self,
         token: &TransferToken,
-        clip_id: ClipId,
+        clip_id: Option<ClipId>,
         source_device_id: DeviceId,
         authorized_public_keys: HashMap<DeviceId, String>,
         paths: Vec<PathBuf>,
@@ -76,6 +76,18 @@ impl PeerFileRegistry {
         Ok(())
     }
 
+    pub fn bind_clip_id(&self, token: &TransferToken, clip_id: ClipId) -> anyhow::Result<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("peer file registry lock poisoned"))?;
+        let Some(grant) = guard.get_mut(token.as_str()) else {
+            return Ok(());
+        };
+        grant.clip_id = Some(clip_id);
+        Ok(())
+    }
+
     fn claim(
         &self,
         token: &str,
@@ -94,8 +106,10 @@ impl PeerFileRegistry {
             guard.remove(token);
             return Ok(PeerFileClaim::Expired);
         }
-        if request.clip_id != grant.clip_id.as_str() {
-            return Ok(PeerFileClaim::Unauthorized("clip mismatch"));
+        if let Some(clip_id) = &grant.clip_id {
+            if request.clip_id != clip_id.as_str() {
+                return Ok(PeerFileClaim::Unauthorized("clip mismatch"));
+            }
         }
         if request.source_device_id != grant.source_device_id.as_str() {
             return Ok(PeerFileClaim::Unauthorized("source device mismatch"));
@@ -119,7 +133,7 @@ impl PeerFileRegistry {
         if verify_peer_file_request(
             public_key,
             &request.signature,
-            grant.clip_id.as_str(),
+            &request.clip_id,
             grant.source_device_id.as_str(),
             &request.requester_device_id,
             token,

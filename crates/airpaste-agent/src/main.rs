@@ -21,7 +21,7 @@ use airpaste_core::{
     BlobRef, ClipId, ClipKind, DeviceId, EncryptionInfo, FileClip, FileEntry, FileEntryKind,
     TextClip, TransferToken,
 };
-use airpaste_protocol::ServerEvent;
+use airpaste_protocol::{CreateRelaySessionRequest, ServerEvent};
 use anyhow::{bail, Context};
 use chrono::Duration as ChronoDuration;
 use clap::Parser;
@@ -85,7 +85,9 @@ async fn main() -> anyhow::Result<()> {
         identity.public_key_base64(),
     )
     .await?;
-    client.set_request_device_id(device_id.clone()).await;
+    client
+        .set_request_identity(device_id.clone(), identity.clone())
+        .await;
     if let Some(pair_code) = args
         .pair_code
         .clone()
@@ -96,6 +98,73 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("failed to confirm pairing")?;
         tracing::info!(trusted = device.trusted, "pairing confirmed");
+    }
+    if args.create_pair_code {
+        let response = client
+            .start_pairing(device_id.clone(), args.pair_ttl_seconds)
+            .await
+            .context("failed to start pairing")?;
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    if args.print_latest_clip {
+        let clip = client
+            .latest_clip()
+            .await
+            .context("failed to get latest clip")?;
+        println!("{}", serde_json::to_string(&clip)?);
+        return Ok(());
+    }
+    if args.replay_latest_clip_signature {
+        client
+            .replay_latest_clip_signature()
+            .await
+            .context("failed to verify latest clip replay rejection")?;
+        println!("{}", serde_json::json!({"replay_rejected": true}));
+        return Ok(());
+    }
+    if let Some(text) = args.publish_text_once.clone() {
+        let utf8_len = text.len() as u64;
+        let response = client
+            .create_clip(
+                device_id.clone(),
+                ClipKind::Text(TextClip {
+                    utf8_len,
+                    preview: None,
+                    encrypted_body_ref: BlobRef {
+                        id: format!("inline:{utf8_len}"),
+                        byte_len: utf8_len,
+                    },
+                    encrypted_inline_body: Some(text),
+                }),
+                EncryptionInfo {
+                    scheme: "mvp-inline-placeholder".to_string(),
+                    key_wrapped_for: vec![device_id.clone()],
+                },
+            )
+            .await
+            .context("failed to publish text clip")?;
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    if let Some(clip_id) = args.create_relay_for_clip.clone() {
+        let recipient_device_id = args
+            .relay_recipient_device_id
+            .clone()
+            .map(DeviceId::from)
+            .unwrap_or_else(|| device_id.clone());
+        let response = client
+            .create_relay_session(CreateRelaySessionRequest {
+                clip_id: ClipId::from(clip_id),
+                source_device_id: device_id.clone(),
+                recipient_device_id,
+                max_bytes: args.relay_max_bytes,
+                ttl_seconds: args.relay_ttl_seconds,
+            })
+            .await
+            .context("failed to create relay session")?;
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
     }
     tracing::info!(%device_id, server = %args.server_url, "agent started");
 
@@ -347,6 +416,14 @@ async fn publish_file_manifest(
     let transfer_expires_at = airpaste_core::now()
         + ChronoDuration::seconds(file_policy.transfer_token_ttl_secs.min(i64::MAX as u64) as i64);
     let file_count = files.len();
+    peer_registry.register(
+        &transfer_token,
+        None,
+        device_id.clone(),
+        trusted_device_public_keys(client).await?,
+        paths.clone(),
+        file_policy.transfer_token_ttl,
+    )?;
     let response = client
         .create_clip(
             device_id.clone(),
@@ -369,14 +446,7 @@ async fn publish_file_manifest(
         total_size,
         "published file manifest"
     );
-    peer_registry.register(
-        &transfer_token,
-        response.clip_id,
-        device_id.clone(),
-        trusted_device_public_keys(client).await?,
-        paths.clone(),
-        file_policy.transfer_token_ttl,
-    )?;
+    peer_registry.bind_clip_id(&transfer_token, response.clip_id)?;
 
     Ok(())
 }

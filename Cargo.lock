@@ -54,6 +54,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -64,12 +65,15 @@ dependencies = [
  "airpaste-protocol",
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "clap",
+ "ed25519-dalek",
  "futures-util",
  "redb",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tower-http 0.5.2",
