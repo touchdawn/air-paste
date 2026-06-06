@@ -69,6 +69,8 @@ Run the agent against a local server:
 .\target\debug\airpaste-agent.exe --server-url http://127.0.0.1:8080 --state-path .\.airpaste-agent-a.json --device-name "PC A" --auth-token "<secret-if-server-enabled-it>"
 ```
 
+To join a non-first device, create a pairing code through `POST /v1/pair/start`, then start the new agent with `--pair-code <code>`. The first registered device in a fresh database is trusted automatically for bootstrap.
+
 Current agent scope:
 
 - Windows text clipboard publish/apply.

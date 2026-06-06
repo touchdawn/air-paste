@@ -11,6 +11,9 @@ pub struct Args {
     #[arg(long, env = "AIRPASTE_AUTH_TOKEN")]
     pub auth_token: Option<String>,
 
+    #[arg(long, env = "AIRPASTE_PAIR_CODE")]
+    pub pair_code: Option<String>,
+
     #[arg(long, env = "AIRPASTE_DEVICE_NAME", default_value = "Windows Agent")]
     pub device_name: String,
 

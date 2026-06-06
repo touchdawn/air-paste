@@ -85,6 +85,17 @@ async fn main() -> anyhow::Result<()> {
         identity.public_key_base64(),
     )
     .await?;
+    if let Some(pair_code) = args
+        .pair_code
+        .clone()
+        .filter(|pair_code| !pair_code.trim().is_empty())
+    {
+        let device = client
+            .confirm_pairing(pair_code, device_id.clone())
+            .await
+            .context("failed to confirm pairing")?;
+        tracing::info!(trusted = device.trusted, "pairing confirmed");
+    }
     tracing::info!(%device_id, server = %args.server_url, "agent started");
 
     let clipboard = Arc::new(Clipboard::new());

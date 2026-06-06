@@ -22,30 +22,6 @@ if ($AuthToken) {
     $authArgs = @("--auth-token", $AuthToken)
 }
 
-function Wait-AgentDeviceId {
-    param([string]$StatePath)
-    $deadline = (Get-Date).AddSeconds(10)
-    while (!(Test-Path -LiteralPath $StatePath) -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 250
-    }
-    if (!(Test-Path -LiteralPath $StatePath)) {
-        throw "agent state file missing: $StatePath"
-    }
-    return (Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json).device_id
-}
-
-function Trust-SmokeDevice {
-    param([string]$DeviceId)
-    $pair = Invoke-RestMethod "$baseUrl/v1/pair/start" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-        created_by = $null
-        ttl_seconds = 600
-    } | ConvertTo-Json)
-    Invoke-RestMethod "$baseUrl/v1/pair/confirm" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-        code = $pair.code
-        device_id = $DeviceId
-    } | ConvertTo-Json) | Out-Null
-}
-
 Remove-Item -Force -Recurse -ErrorAction SilentlyContinue $db, $publishState, $applyState, $filePublishState, $fileReceiveState, $fileReceiveCache
 
 $serverArgs = @("--bind", $Bind, "--db", $db) + $authArgs
@@ -135,10 +111,15 @@ try {
     Stop-Process -Id $applier.Id -Force
 
     Write-Host "File manifest path"
+    $fileReceiverPair = Invoke-RestMethod "$baseUrl/v1/pair/start" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
+        created_by = $null
+        ttl_seconds = 600
+    } | ConvertTo-Json)
     $fileReceiverArgs = @(
         "--server-url", $baseUrl,
         "--device-name", "smoke-file-receiver",
         "--state-path", $fileReceiveState,
+        "--pair-code", $fileReceiverPair.code,
         "--publish-clipboard=false",
         "--auto-apply-files=true",
         "--remote-paste-hotkey=false",
@@ -158,8 +139,6 @@ try {
     ) + $authArgs
     $filePublisher = Start-Process -FilePath $agentExe -ArgumentList $filePublisherArgs -WorkingDirectory $root -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
-    $fileReceiverDeviceId = Wait-AgentDeviceId $fileReceiveState
-    Trust-SmokeDevice $fileReceiverDeviceId
 
     $sampleFile = Join-Path $root "target\agent-smoke-file.txt"
     $sampleContent = "airpaste file smoke $(Get-Date -Format o)"

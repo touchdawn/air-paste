@@ -1,9 +1,10 @@
 use crate::identity::{DeviceIdentity, PEER_FILE_SIGNATURE_ALG};
 use airpaste_core::{
-    ClipId, ClipKind, ClipRecord, Device, DeviceId, EncryptionInfo, TransferToken,
+    ClipId, ClipKind, ClipRecord, Device, DeviceId, EncryptionInfo, PairingCode, TransferToken,
 };
 use airpaste_protocol::{
-    CreateClipRequest, CreateClipResponse, RegisterDeviceRequest, RegisterDeviceResponse,
+    ConfirmPairingRequest, ConfirmPairingResponse, CreateClipRequest, CreateClipResponse,
+    RegisterDeviceRequest, RegisterDeviceResponse,
 };
 use anyhow::Context;
 use tokio_tungstenite::tungstenite::{
@@ -74,6 +75,26 @@ impl ServerClient {
             .json::<Vec<Device>>()
             .await
             .context("failed to decode device list")
+    }
+
+    pub async fn confirm_pairing(
+        &self,
+        code: String,
+        device_id: DeviceId,
+    ) -> anyhow::Result<Device> {
+        let response = self
+            .authorized(self.http.post(format!("{}/v1/pair/confirm", self.base_url)))
+            .json(&ConfirmPairingRequest {
+                code: PairingCode(code),
+                device_id,
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ConfirmPairingResponse>()
+            .await
+            .context("failed to decode confirm pairing response")?;
+        Ok(response.device)
     }
 
     pub async fn create_clip(
