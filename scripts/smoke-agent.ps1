@@ -13,6 +13,7 @@ $publishState = Join-Path $root "target\agent-publish.json"
 $applyState = Join-Path $root "target\agent-apply.json"
 $filePublishState = Join-Path $root "target\agent-file-publish.json"
 $fileReceiveState = Join-Path $root "target\agent-file-receive.json"
+$fileLimitState = Join-Path $root "target\agent-file-limit.json"
 $fileReceiveCache = Join-Path $root "target\agent-file-cache"
 $baseUrl = "http://$Bind"
 $authHeaders = @{}
@@ -85,7 +86,7 @@ function Get-LatestClip() {
     return $json | ConvertFrom-Json
 }
 
-Remove-Item -Force -Recurse -ErrorAction SilentlyContinue $db, $publishState, $applyState, $filePublishState, $fileReceiveState, $fileReceiveCache
+Remove-Item -Force -Recurse -ErrorAction SilentlyContinue $db, $publishState, $applyState, $filePublishState, $fileReceiveState, $fileLimitState, $fileReceiveCache
 
 $serverArgs = @("--bind", $Bind, "--db", $db) + $authArgs
 $server = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -WorkingDirectory $root -WindowStyle Hidden -PassThru
@@ -159,6 +160,7 @@ try {
         "--publish-clipboard=false",
         "--auto-apply-files=true",
         "--remote-paste-hotkey=false",
+        "--max-single-file-bytes", "1048576",
         "--peer-bind", "127.0.0.1:17392",
         "--cache-dir", $fileReceiveCache
     ) + $authArgs
@@ -172,6 +174,7 @@ try {
         "--pair-code", $filePublisherPair.code,
         "--apply-remote=false",
         "--remote-paste-hotkey=false",
+        "--max-single-file-bytes", "1048576",
         "--peer-bind", "127.0.0.1:17391",
         "--peer-public-url", "http://127.0.0.1:17391"
     ) + $authArgs
@@ -226,6 +229,33 @@ try {
     }
     Stop-Process -Id $filePublisher.Id -Force -ErrorAction SilentlyContinue
     Stop-Process -Id $fileReceiver.Id -Force -ErrorAction SilentlyContinue
+
+    Write-Host "Single-file limit guard"
+    $latestBeforeLimit = Get-LatestClip
+    $fileLimitPair = New-PairCode
+    $fileLimitArgs = @(
+        "--server-url", $baseUrl,
+        "--device-name", "smoke-file-limit",
+        "--state-path", $fileLimitState,
+        "--pair-code", $fileLimitPair.code,
+        "--apply-remote=false",
+        "--remote-paste-hotkey=false",
+        "--max-single-file-bytes", "1",
+        "--peer-bind", "127.0.0.1:17393",
+        "--peer-public-url", "http://127.0.0.1:17393"
+    ) + $authArgs
+    $fileLimitPublisher = Start-Process -FilePath $agentExe -ArgumentList $fileLimitArgs -WorkingDirectory $root -WindowStyle Hidden -PassThru
+    Start-Sleep -Seconds 2
+
+    $oversizedFile = Join-Path $root "target\agent-smoke-file-limit.txt"
+    Set-Content -LiteralPath $oversizedFile -Value "xx" -NoNewline
+    Set-Clipboard -LiteralPath $oversizedFile
+    Start-Sleep -Seconds 2
+    $latestAfterLimit = Get-LatestClip
+    if ($latestAfterLimit.clip_id -ne $latestBeforeLimit.clip_id) {
+        throw "single-file limit smoke failed: oversized file was published"
+    }
+    Stop-Process -Id $fileLimitPublisher.Id -Force -ErrorAction SilentlyContinue
 
     Write-Host "Agent smoke passed"
 }

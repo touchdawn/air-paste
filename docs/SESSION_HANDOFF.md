@@ -116,6 +116,7 @@ Useful agent flags:
 - `--peer-public-url`
 - `--cache-dir`
 - `--max-file-count`
+- `--max-single-file-bytes`
 - `--max-total-file-bytes`
 - `--transfer-token-ttl-secs`
 - `--auto-apply-files=true`
@@ -131,6 +132,7 @@ File payloads do not go through the server in the normal MVP path.
 Source-side behavior:
 
 - Publishes a `FileClip` manifest to the server.
+- Rejects regular files above `--max-single-file-bytes` before publishing a manifest.
 - Registers local original file paths under a short-lived `transfer_token`.
 - The token TTL defaults to 600 seconds.
 - Each file index can be downloaded once.
@@ -143,6 +145,7 @@ GET /v1/files/{transfer_token}/{index}
 Requester-side behavior:
 
 - Downloads from `source_peer_url`.
+- Rejects remote file manifests whose regular files exceed `--max-single-file-bytes`.
 - Verifies each downloaded file byte count matches the manifest `FileEntry.size` before writing it into the local cache.
 - Adds these peer request headers:
   - `x-airpaste-clip-id`
@@ -169,6 +172,7 @@ Smoke coverage:
 - Trusted-device signed API guard path: missing signature returns `401`, untrusted signed request returns `403`, paired signed request is allowed, replayed nonce returns `401`.
 - Peer unauthenticated request returns `401`.
 - Repeated file index download returns `410`.
+- Single-file size limit rejects oversized local file publication.
 
 ## Important MVP Limitations
 
@@ -210,7 +214,6 @@ Options:
 
 Useful incremental improvements:
 
-- Add max single-file size.
 - Add SHA-256 while streaming.
 - Add directory walking with file count and total-size caps.
 

@@ -73,6 +73,13 @@ pub struct Args {
     )]
     pub max_total_file_bytes: u64,
 
+    #[arg(
+        long,
+        env = "AIRPASTE_MAX_SINGLE_FILE_BYTES",
+        default_value_t = 10 * 1024 * 1024 * 1024
+    )]
+    pub max_single_file_bytes: u64,
+
     #[arg(long, env = "AIRPASTE_TRANSFER_TOKEN_TTL_SECS", default_value_t = 600)]
     pub transfer_token_ttl_secs: u64,
 

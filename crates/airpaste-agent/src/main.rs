@@ -40,6 +40,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 struct FileTransferPolicy {
     max_file_count: usize,
     max_total_file_bytes: u64,
+    max_single_file_bytes: u64,
     transfer_token_ttl: Duration,
     transfer_token_ttl_secs: u64,
 }
@@ -73,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
     let file_policy = FileTransferPolicy {
         max_file_count: args.max_file_count,
         max_total_file_bytes: args.max_total_file_bytes,
+        max_single_file_bytes: args.max_single_file_bytes,
         transfer_token_ttl: Duration::from_secs(transfer_token_ttl_secs),
         transfer_token_ttl_secs,
     };
@@ -378,11 +380,20 @@ async fn publish_file_manifest(
 
     for path in &paths {
         let metadata = std::fs::metadata(&path).ok();
+        let is_file = metadata.as_ref().is_some_and(|metadata| metadata.is_file());
         let size = metadata
             .as_ref()
-            .filter(|metadata| metadata.is_file())
+            .filter(|_| is_file)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
+        if is_file && size > file_policy.max_single_file_bytes {
+            bail!(
+                "file {} is {} bytes, above configured single-file limit {}",
+                path.display(),
+                size,
+                file_policy.max_single_file_bytes
+            );
+        }
         total_size = total_size.saturating_add(size);
         if total_size > file_policy.max_total_file_bytes {
             bail!(
@@ -750,6 +761,18 @@ fn validate_file_clip(
             file_clip.total_size,
             file_policy.max_total_file_bytes
         );
+    }
+    for entry in &file_clip.files {
+        if matches!(entry.kind, FileEntryKind::File)
+            && entry.size > file_policy.max_single_file_bytes
+        {
+            bail!(
+                "remote file {} is {} bytes, above configured single-file limit {}",
+                entry.relative_path,
+                entry.size,
+                file_policy.max_single_file_bytes
+            );
+        }
     }
     if let Some(expires_at) = &file_clip.transfer_expires_at {
         if expires_at < &airpaste_core::now() {
