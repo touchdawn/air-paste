@@ -90,7 +90,8 @@ File transfer MVP notes:
 - Peer file requests must include `x-airpaste-clip-id`, `x-airpaste-source-device-id`, `x-airpaste-requester-device-id`, and an Ed25519 `x-airpaste-signature`; the source agent verifies the requester against trusted device public keys from the server.
 - The peer transfer token has a local TTL, defaults to 600 seconds, and each file index can be downloaded once.
 - File manifest publication is limited by `--max-file-count`, `--max-single-file-bytes`, and `--max-total-file-bytes`.
-- Receivers reject remote file manifests whose regular files exceed `--max-single-file-bytes` and verify downloaded byte counts against the manifest before writing files into the cache.
+- New file manifests include lowercase hex SHA-256 for regular files.
+- Receivers reject remote file manifests whose regular files exceed `--max-single-file-bytes`, stream peer downloads into temporary files, and verify downloaded byte counts plus SHA-256 before writing files into the cache. Older manifests without SHA-256 fall back to size-only verification with a warning.
 - Only regular files are downloaded in this MVP. Directories are announced in the manifest but skipped by transfer.
 - Downloaded files are written under `--cache-dir/<transfer_token>/`.
 - By default, a remote file manifest is only recorded as pending. Press `Ctrl+Shift+V` on the receiver to download the latest pending files, write them to the local clipboard, and send a normal paste.

@@ -26,13 +26,17 @@ use anyhow::{bail, Context};
 use chrono::Duration as ChronoDuration;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{mpsc, Mutex},
+};
 use tokio_tungstenite::tungstenite::Message;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -413,13 +417,22 @@ async fn publish_file_manifest(
         } else {
             FileEntryKind::File
         };
+        let sha256 = if is_file {
+            Some(
+                hash_file_sha256(path)
+                    .await
+                    .with_context(|| format!("failed to hash file {}", path.display()))?,
+            )
+        } else {
+            None
+        };
 
         files.push(FileEntry {
             relative_path: display_name.clone(),
             display_name,
             size,
             modified_at: None,
-            sha256: None,
+            sha256,
             kind,
         });
     }
@@ -813,8 +826,8 @@ async fn download_remote_files(
             file_clip.transfer_token.as_str(),
             index
         );
-        let bytes = client
-            .download_peer_file(
+        let response = client
+            .open_peer_file_download(
                 &url,
                 &pending.clip_id,
                 &pending.source_device_id,
@@ -822,7 +835,50 @@ async fn download_remote_files(
                 identity,
             )
             .await?;
-        let downloaded_size = bytes.len() as u64;
+        let destination = safe_cache_path(&clip_cache_dir, &entry.display_name);
+        download_peer_file_to_cache(response, entry, &destination).await?;
+        tracing::info!(path = %destination.display(), "downloaded remote file");
+        downloaded_files.push(destination);
+    }
+
+    Ok(downloaded_files)
+}
+
+async fn hash_file_sha256(path: &Path) -> anyhow::Result<String> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(hex_lower(&hasher.finalize()))
+}
+
+async fn download_peer_file_to_cache(
+    mut response: reqwest::Response,
+    entry: &FileEntry,
+    destination: &Path,
+) -> anyhow::Result<()> {
+    let temporary = destination.with_extension("airpaste-download");
+    let mut file = tokio::fs::File::create(&temporary).await?;
+    let mut hasher = Sha256::new();
+    let mut downloaded_size = 0u64;
+
+    let result = async {
+        while let Some(chunk) = response.chunk().await? {
+            downloaded_size = downloaded_size.saturating_add(chunk.len() as u64);
+            hasher.update(&chunk);
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        drop(file);
+
         if downloaded_size != entry.size {
             bail!(
                 "remote file size mismatch for {}: manifest declared {} bytes, downloaded {} bytes",
@@ -831,13 +887,33 @@ async fn download_remote_files(
                 downloaded_size
             );
         }
-        let destination = safe_cache_path(&clip_cache_dir, &entry.display_name);
-        tokio::fs::write(&destination, bytes).await?;
-        tracing::info!(path = %destination.display(), "downloaded remote file");
-        downloaded_files.push(destination);
-    }
 
-    Ok(downloaded_files)
+        if let Some(expected_sha256) = &entry.sha256 {
+            let actual_sha256 = hex_lower(&hasher.finalize());
+            if !expected_sha256.eq_ignore_ascii_case(&actual_sha256) {
+                bail!(
+                    "remote file SHA-256 mismatch for {}: manifest declared {}, downloaded {}",
+                    entry.relative_path,
+                    expected_sha256,
+                    actual_sha256
+                );
+            }
+        } else {
+            tracing::warn!(
+                relative_path = %entry.relative_path,
+                "remote file manifest omitted SHA-256; verified size only"
+            );
+        }
+
+        tokio::fs::rename(&temporary, destination).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result
 }
 
 fn safe_cache_path(cache_dir: &Path, display_name: &str) -> PathBuf {
@@ -855,6 +931,16 @@ fn safe_cache_path(cache_dir: &Path, display_name: &str) -> PathBuf {
         sanitized.trim()
     };
     cache_dir.join(file_name)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(HEX[(byte >> 4) as usize] as char);
+        value.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    value
 }
 
 async fn shutdown_signal() {

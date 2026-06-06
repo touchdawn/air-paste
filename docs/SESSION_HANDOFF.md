@@ -133,6 +133,7 @@ Source-side behavior:
 
 - Publishes a `FileClip` manifest to the server.
 - Rejects regular files above `--max-single-file-bytes` before publishing a manifest.
+- Adds lowercase hex SHA-256 to manifest entries for regular files.
 - Registers local original file paths under a short-lived `transfer_token`.
 - The token TTL defaults to 600 seconds.
 - Each file index can be downloaded once.
@@ -146,7 +147,9 @@ Requester-side behavior:
 
 - Downloads from `source_peer_url`.
 - Rejects remote file manifests whose regular files exceed `--max-single-file-bytes`.
-- Verifies each downloaded file byte count matches the manifest `FileEntry.size` before writing it into the local cache.
+- Streams each downloaded file into a temporary cache file.
+- Verifies each downloaded file byte count matches `FileEntry.size` and, when present, its SHA-256 matches `FileEntry.sha256` before renaming it into the local cache.
+- Falls back to size-only verification for old manifests that omit `FileEntry.sha256`, with a warning.
 - Adds these peer request headers:
   - `x-airpaste-clip-id`
   - `x-airpaste-source-device-id`
@@ -167,6 +170,7 @@ Smoke coverage:
 - Text publish/apply.
 - File manifest publish.
 - File peer download.
+- File manifest and downloaded file SHA-256 verification.
 - Local file clipboard write.
 - Server auth token path.
 - Trusted-device signed API guard path: missing signature returns `401`, untrusted signed request returns `403`, paired signed request is allowed, replayed nonce returns `401`.
@@ -188,7 +192,7 @@ Transfer:
 - Peer file server streams file responses from disk instead of buffering entire files in memory.
 - Directories are represented in the manifest but skipped by transfer.
 - There is no recursive directory copy.
-- There is no resume, chunking, cryptographic checksum validation, or transfer progress.
+- There is no resume, explicit chunk protocol, or transfer progress.
 - There is no mDNS/LAN discovery yet.
 - Relay session metadata exists, but the relay data path is not implemented.
 
@@ -214,7 +218,6 @@ Options:
 
 Useful incremental improvements:
 
-- Add SHA-256 while streaming.
 - Add directory walking with file count and total-size caps.
 
 ### 3. Start macOS Agent

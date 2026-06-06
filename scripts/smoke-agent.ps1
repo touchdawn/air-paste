@@ -194,6 +194,14 @@ try {
     if ($fileClip.kind.files.files[0].display_name -ne "agent-smoke-file.txt") {
         throw "file manifest smoke failed: unexpected display name"
     }
+    $manifestSha256 = [string]$fileClip.kind.files.files[0].sha256
+    if (![regex]::IsMatch($manifestSha256, '^[0-9a-f]{64}$')) {
+        throw "file manifest smoke failed: sha256 was not 64-char lowercase hex"
+    }
+    $sampleSha256 = (Get-FileHash -LiteralPath $sampleFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($manifestSha256 -ne $sampleSha256) {
+        throw "file manifest smoke failed: sha256 did not match source file"
+    }
     $downloaded = Join-Path $fileReceiveCache (Join-Path $fileClip.kind.files.transfer_token "agent-smoke-file.txt")
     $deadline = (Get-Date).AddSeconds(10)
     while (!(Test-Path -LiteralPath $downloaded) -and (Get-Date) -lt $deadline) {
@@ -205,6 +213,10 @@ try {
     $downloadedContent = Get-Content -LiteralPath $downloaded -Raw
     if ($downloadedContent -ne $sampleContent) {
         throw "file transfer smoke failed: downloaded content mismatch"
+    }
+    $downloadedSha256 = (Get-FileHash -LiteralPath $downloaded -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($downloadedSha256 -ne $manifestSha256) {
+        throw "file transfer smoke failed: downloaded sha256 mismatch"
     }
     $peerFileUrl = "http://127.0.0.1:17391/v1/files/$($fileClip.kind.files.transfer_token)/0"
     try {
