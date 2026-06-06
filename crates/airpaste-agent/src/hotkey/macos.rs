@@ -1,15 +1,16 @@
 use anyhow::Context;
 use core_foundation_sys::base::{OSStatus, UInt32};
-use std::{ffi::c_void, ptr::null_mut};
+use std::{ffi::c_void, ptr::null_mut, sync::mpsc, time::Duration};
 
 const HOTKEY_ID_REMOTE_PASTE: u32 = 1;
 const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"Apst");
 const KEY_CODE_V: u32 = 9;
-const CMD_KEY: u32 = 1 << 8;
 const SHIFT_KEY: u32 = 1 << 9;
+const CONTROL_KEY: u32 = 1 << 12;
 const NO_ERR: OSStatus = 0;
 const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
-const EVENT_KIND_HOTKEY_PRESSED: u32 = 6;
+const EVENT_KIND_HOTKEY_PRESSED: u32 = 5;
+const REMOTE_PASTE_HOTKEY_LABEL: &str = "Ctrl+Shift+V";
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -65,25 +66,39 @@ extern "C" {
 pub fn spawn_remote_paste_listener(
     sender: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> anyhow::Result<()> {
+    let (ready_tx, ready_rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("airpaste-hotkey".to_string())
         .spawn(move || {
-            if let Err(error) = run_hotkey_loop(sender) {
+            if let Err(error) = run_hotkey_loop(sender, ready_tx) {
                 tracing::warn!(%error, "remote paste hotkey listener stopped");
             }
         })
         .context("failed to spawn macOS hotkey listener")?;
-    Ok(())
+
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => anyhow::bail!(error),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            anyhow::bail!("macOS hotkey listener did not report readiness")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("macOS hotkey listener stopped before reporting readiness")
+        }
+    }
 }
 
-fn run_hotkey_loop(sender: tokio::sync::mpsc::UnboundedSender<()>) -> anyhow::Result<()> {
+fn run_hotkey_loop(
+    sender: tokio::sync::mpsc::UnboundedSender<()>,
+    ready: mpsc::Sender<Result<(), String>>,
+) -> anyhow::Result<()> {
     let sender = Box::into_raw(Box::new(sender));
     let target = unsafe { GetApplicationEventTarget() };
     if target.is_null() {
         unsafe {
             drop(Box::from_raw(sender));
         }
-        anyhow::bail!("GetApplicationEventTarget returned null");
+        return fail_ready(ready, "GetApplicationEventTarget returned null");
     }
 
     let event_type = EventTypeSpec {
@@ -105,14 +120,17 @@ fn run_hotkey_loop(sender: tokio::sync::mpsc::UnboundedSender<()>) -> anyhow::Re
         unsafe {
             drop(Box::from_raw(sender));
         }
-        anyhow::bail!("InstallEventHandler failed with status {status}");
+        return fail_ready(
+            ready,
+            format!("InstallEventHandler failed with status {status}"),
+        );
     }
 
     let mut hotkey_ref = null_mut();
     let status = unsafe {
         RegisterEventHotKey(
             KEY_CODE_V,
-            CMD_KEY | SHIFT_KEY,
+            CONTROL_KEY | SHIFT_KEY,
             EventHotKeyID {
                 signature: HOTKEY_SIGNATURE,
                 id: HOTKEY_ID_REMOTE_PASTE,
@@ -127,7 +145,10 @@ fn run_hotkey_loop(sender: tokio::sync::mpsc::UnboundedSender<()>) -> anyhow::Re
             RemoveEventHandler(handler_ref);
             drop(Box::from_raw(sender));
         }
-        anyhow::bail!("RegisterEventHotKey(Cmd+Shift+V) failed with status {status}");
+        return fail_ready(
+            ready,
+            format!("RegisterEventHotKey({REMOTE_PASTE_HOTKEY_LABEL}) failed with status {status}"),
+        );
     }
 
     let _guard = HotkeyGuard {
@@ -135,13 +156,23 @@ fn run_hotkey_loop(sender: tokio::sync::mpsc::UnboundedSender<()>) -> anyhow::Re
         handler_ref,
         sender,
     };
-    tracing::info!("registered remote paste hotkey Cmd+Shift+V");
+    tracing::info!("registered remote paste hotkey {REMOTE_PASTE_HOTKEY_LABEL}");
+    let _ = ready.send(Ok(()));
 
     unsafe {
         RunApplicationEventLoop();
     }
 
     Ok(())
+}
+
+fn fail_ready<T>(
+    ready: mpsc::Sender<Result<(), String>>,
+    message: impl Into<String>,
+) -> anyhow::Result<T> {
+    let message = message.into();
+    let _ = ready.send(Err(message.clone()));
+    anyhow::bail!(message)
 }
 
 unsafe extern "C" fn handle_hotkey_event(
@@ -151,6 +182,7 @@ unsafe extern "C" fn handle_hotkey_event(
 ) -> OSStatus {
     if !user_data.is_null() {
         let sender = &*(user_data as *const tokio::sync::mpsc::UnboundedSender<()>);
+        tracing::info!("received remote paste hotkey {REMOTE_PASTE_HOTKEY_LABEL}");
         let _ = sender.send(());
     }
     NO_ERR

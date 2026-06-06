@@ -143,7 +143,7 @@ When device A copies files:
 
 When the user wants to paste on device B:
 
-1. The user presses the Air Paste remote paste hotkey, for example `Ctrl+Shift+V` on Windows or `Cmd+Shift+V` on macOS.
+1. The user presses the Air Paste remote paste hotkey, for example `Ctrl+Shift+V` on Windows or macOS.
 2. Agent B resolves the latest remote file manifest.
 3. Agent B negotiates a direct connection to Agent A.
 4. Agent B downloads the files into a local cache directory.
@@ -714,7 +714,7 @@ cache_max_size_mb = 20480
 
 [hotkeys]
 remote_paste_windows = "Ctrl+Shift+V"
-remote_paste_macos = "Cmd+Shift+V"
+remote_paste_macos = "Ctrl+Shift+V"
 ```
 
 ## 17. Observability
@@ -839,4 +839,3 @@ The UI should expose a simple diagnostics page with:
 - Should images auto-apply to clipboard or wait for explicit user action?
 - Is relay allowed on the user's DDNS Windows server for files up to the configured relay size limit?
 - Should the agent support multiple clipboard channels later, such as personal/work profiles?
-

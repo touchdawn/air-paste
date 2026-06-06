@@ -25,6 +25,13 @@ pub struct Args {
 
     #[arg(
         long,
+        env = "AIRPASTE_APPLY_LATEST_FILES_ONCE",
+        default_value_t = false
+    )]
+    pub apply_latest_files_once: bool,
+
+    #[arg(
+        long,
         env = "AIRPASTE_REPLAY_LATEST_CLIP_SIGNATURE",
         default_value_t = false
     )]
@@ -45,11 +52,11 @@ pub struct Args {
     #[arg(long, env = "AIRPASTE_RELAY_TTL_SECONDS")]
     pub relay_ttl_seconds: Option<i64>,
 
-    #[arg(long, env = "AIRPASTE_DEVICE_NAME", default_value = "Windows Agent")]
-    pub device_name: String,
+    #[arg(long, env = "AIRPASTE_DEVICE_NAME")]
+    pub device_name: Option<String>,
 
-    #[arg(long, env = "AIRPASTE_STATE", default_value = ".airpaste-agent.json")]
-    pub state_path: PathBuf,
+    #[arg(long, env = "AIRPASTE_STATE")]
+    pub state_path: Option<PathBuf>,
 
     #[arg(long, env = "AIRPASTE_POLL_MS", default_value_t = 750)]
     pub poll_ms: u64,
@@ -60,8 +67,8 @@ pub struct Args {
     #[arg(long, env = "AIRPASTE_PEER_PUBLIC_URL")]
     pub peer_public_url: Option<String>,
 
-    #[arg(long, env = "AIRPASTE_CACHE_DIR", default_value = ".airpaste-cache")]
-    pub cache_dir: PathBuf,
+    #[arg(long, env = "AIRPASTE_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
 
     #[arg(long, env = "AIRPASTE_MAX_FILE_COUNT", default_value_t = 1000)]
     pub max_file_count: usize,
@@ -115,4 +122,73 @@ pub struct Args {
         action = clap::ArgAction::Set
     )]
     pub apply_remote: bool,
+}
+
+impl Args {
+    pub fn device_name(&self) -> String {
+        self.device_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(default_device_name)
+    }
+
+    pub fn state_path(&self) -> PathBuf {
+        self.state_path.clone().unwrap_or_else(default_state_path)
+    }
+
+    pub fn cache_dir(&self) -> PathBuf {
+        self.cache_dir.clone().unwrap_or_else(default_cache_dir)
+    }
+}
+
+fn default_device_name() -> String {
+    #[cfg(windows)]
+    {
+        "Windows Agent".to_string()
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        "Mac Agent".to_string()
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        "Air Paste Agent".to_string()
+    }
+}
+
+fn default_state_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = home_dir() {
+            return home
+                .join("Library")
+                .join("Application Support")
+                .join("AirPaste")
+                .join("agent.json");
+        }
+    }
+
+    PathBuf::from(".airpaste-agent.json")
+}
+
+fn default_cache_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = home_dir() {
+            return home.join("Library").join("Caches").join("AirPaste");
+        }
+    }
+
+    PathBuf::from(".airpaste-cache")
+}
+
+#[cfg(target_os = "macos")]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }

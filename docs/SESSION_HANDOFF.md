@@ -6,22 +6,23 @@ This document is for the next coding session. It summarizes the current repo sta
 
 ## Current Repository State
 
-Branch: `main`
+Branch: `codex/macos-agent`
 
 Recent commits:
 
+- `935edaf Merge remote-tracking branch 'origin/main' into codex/macos-agent`
+- `fda0af2 feat: add macos agent clipboard and hotkey`
+- `13c3907 feat: sign sensitive server requests`
+- `cf86126 feat: restrict server APIs to trusted devices`
+- `2813084 docs: add handoff and macos agent plan`
 - `f692f31 feat: let agents confirm pairing codes`
-- `eeea033 feat: sign peer file download requests`
-- `d0e5b5d feat: bind peer downloads to device request headers`
-- `6f77287 feat: add authenticated peer file transfer`
-- `11b7ec2 feat: add server and windows agent MVP`
 
 The workspace currently contains:
 
 - `crates/airpaste-core`: shared IDs and domain models.
 - `crates/airpaste-protocol`: REST and WebSocket DTOs.
 - `crates/airpaste-server`: Axum control-plane server using `redb`.
-- `crates/airpaste-agent`: Windows agent MVP with text sync, file manifest, peer file server, file download, hotkey paste, Ed25519 device identity.
+- `crates/airpaste-agent`: Windows/macOS agent MVP with text sync, file manifest, peer file server, file download, remote paste hotkeys, and Ed25519 device identity.
 
 ## Toolchain Notes
 
@@ -41,6 +42,16 @@ cargo +stable-x86_64-pc-windows-gnu build -p airpaste-agent -p airpaste-server
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1 -Bind 127.0.0.1:18082 -AuthToken airpaste-smoke-secret
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-server.ps1
+```
+
+On macOS:
+
+```bash
+cargo check
+cargo test
+scripts/smoke-agent-macos.sh
+scripts/smoke-agent-macos.sh --auth-token airpaste-smoke-secret
+scripts/smoke-hotkey-macos.sh
 ```
 
 Known harmless warning:
@@ -87,7 +98,7 @@ Pairing/trust:
 - Untrusted devices may register and confirm pairing, but cannot list devices, create/read clips, list history, open WebSocket sync, or create relay sessions until trusted.
 - `POST /v1/devices` registration and `POST /v1/pair/confirm` remain usable by untrusted devices.
 
-## Current Windows Agent Behavior
+## Current Desktop Agent Behavior
 
 Agent state file now stores:
 
@@ -101,16 +112,23 @@ The agent:
 - Reuses the saved private key on later runs.
 - Can confirm pairing with `--pair-code <code>`.
 - Publishes and applies text clipboard clips.
-- Publishes file clipboard manifests from Windows `CF_HDROP`.
+- Publishes file clipboard manifests from Windows `CF_HDROP` and macOS file URLs.
 - Runs a peer HTTP server on `--peer-bind`, default `127.0.0.1:17390`.
 - Receives remote file manifests and records them as pending by default.
 - Downloads pending files on `Ctrl+Shift+V`, writes downloaded cache paths to Windows file clipboard, then sends normal paste.
+- On macOS, downloads pending files on `Ctrl+Shift+V` and writes downloaded cache file URLs to the pasteboard. Synthetic `Cmd+V` paste is still intentionally out of scope.
+- Supports `--apply-latest-files-once` to fetch the latest remote file clip, download its files, write them to the local clipboard/pasteboard, print downloaded paths as JSON, and exit.
+- Uses macOS defaults `~/Library/Application Support/AirPaste/agent.json` for state and `~/Library/Caches/AirPaste` for cache when paths are not explicitly provided.
 
 Useful agent flags:
 
 - `--server-url`
 - `--auth-token`
 - `--pair-code`
+- `--create-pair-code`
+- `--print-latest-clip`
+- `--publish-text-once`
+- `--apply-latest-files-once`
 - `--state-path`
 - `--peer-bind`
 - `--peer-public-url`
@@ -165,6 +183,10 @@ Smoke coverage:
 - File peer download.
 - Local file clipboard write.
 - Server auth token path.
+- macOS scripted text sync.
+- macOS scripted file URL publish, signed peer download, file URL pasteboard apply through `--apply-latest-files-once`.
+- macOS scripted server auth token path.
+- macOS interactive `Ctrl+Shift+V` hotkey harness exists as `scripts/smoke-hotkey-macos.sh`.
 - Trusted-device signed API guard path: missing signature returns `401`, untrusted signed request returns `403`, paired signed request is allowed, replayed nonce returns `401`.
 - Peer unauthenticated request returns `401`.
 - Repeated file index download returns `410`.
@@ -189,8 +211,8 @@ Transfer:
 
 Platform:
 
-- Clipboard, hotkey, paste, and file-drop implementation currently only work on Windows.
-- macOS agent implementation is not started in code yet.
+- Windows supports clipboard text, file drop lists, `Ctrl+Shift+V`, and synthetic paste.
+- macOS supports clipboard text, file URL read/write, `Ctrl+Shift+V`, and one-shot file apply. Synthetic paste is not implemented yet.
 - No tray UI, settings UI, installer, or service/login-item packaging yet.
 
 ## Recommended Next Steps
@@ -214,8 +236,14 @@ Useful incremental improvements:
 - Add SHA-256 while streaming, or at least optional post-download size verification.
 - Add directory walking with file count and total-size caps.
 
-### 3. Start macOS Agent
+### 3. Continue macOS Agent
 
 See `docs/MACOS_AGENT_PLAN.md`.
 
-The best approach is to add macOS implementations behind the existing agent abstractions instead of starting a separate product.
+Useful next macOS steps:
+
+- Manually verify `Ctrl+Shift+V` against Finder and common target apps.
+- Use `scripts/smoke-hotkey-macos.sh` as the first manual hotkey check; it prepares a pending file clip and waits for a real `Ctrl+Shift+V`.
+- Add paste simulation with clear Accessibility permission handling.
+- Decide whether to replace or augment `arboard` with lower-level `NSPasteboard` glue if file URL behavior is not reliable enough.
+- Add LaunchAgent/login item packaging later, after CLI behavior is stable.

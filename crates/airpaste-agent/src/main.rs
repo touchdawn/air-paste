@@ -62,7 +62,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let state_file = StateFile::new(args.state_path.clone());
+    let state_path = args.state_path();
+    let device_name = args.device_name();
+    let cache_dir = args.cache_dir();
+    let state_file = StateFile::new(state_path);
     let mut state = state_file.load()?;
     let identity = Arc::new(ensure_identity(&state_file, &mut state)?);
     let auth_token = args.auth_token.clone().filter(|token| !token.is_empty());
@@ -81,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         &client,
         &state_file,
         &mut state,
-        &args.device_name,
+        &device_name,
         identity.public_key_base64(),
     )
     .await?;
@@ -113,6 +116,23 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("failed to get latest clip")?;
         println!("{}", serde_json::to_string(&clip)?);
+        return Ok(());
+    }
+    if args.apply_latest_files_once {
+        let clipboard = Clipboard::new();
+        let last_local_file_write = Mutex::new(None::<String>);
+        let downloaded_files = apply_latest_files_once(
+            &client,
+            &clipboard,
+            &device_id,
+            &last_local_file_write,
+            &identity,
+            &file_policy,
+            &cache_dir,
+        )
+        .await
+        .context("failed to apply latest file clip")?;
+        println!("{}", serde_json::to_string(&downloaded_files)?);
         return Ok(());
     }
     if args.replay_latest_clip_signature {
@@ -178,8 +198,6 @@ async fn main() -> anyhow::Result<()> {
         .peer_public_url
         .clone()
         .unwrap_or_else(|| format!("http://{}", args.peer_bind));
-    let cache_dir = args.cache_dir.clone();
-
     let peer_task = tokio::spawn(run_peer_server(args.peer_bind, peer_registry.clone()));
 
     let poll_task = if args.publish_clipboard {
@@ -704,34 +722,98 @@ async fn apply_pending_file_clip(
     file_policy: &FileTransferPolicy,
     paste_after_apply: bool,
     cache_dir: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<PathBuf>> {
     let Some(pending) = pending_file_clip.lock().await.clone() else {
         tracing::info!("remote paste requested with no pending file clip");
-        return Ok(());
+        return Ok(Vec::new());
     };
-    let file_clip = &pending.file_clip;
-    validate_file_clip(&file_clip, file_policy)?;
-
-    let downloaded_files =
-        download_remote_files(client, cache_dir, requester_device_id, identity, &pending).await?;
-    if downloaded_files.is_empty() {
-        bail!("remote file clip did not contain downloadable files");
-    }
-
-    clipboard.set_files(&downloaded_files)?;
-    *last_local_file_write.lock().await = clipboard_signature(&downloaded_files);
+    let downloaded_files = apply_file_clip(
+        client,
+        clipboard,
+        requester_device_id,
+        last_local_file_write,
+        &pending,
+        identity,
+        file_policy,
+        cache_dir,
+    )
+    .await?;
     *pending_file_clip.lock().await = None;
-    tracing::info!(
-        file_count = downloaded_files.len(),
-        "applied downloaded files to local clipboard"
-    );
     if paste_after_apply {
         tokio::time::sleep(Duration::from_millis(120)).await;
         paste.paste()?;
         tracing::info!("sent paste hotkey for downloaded files");
     }
 
-    Ok(())
+    Ok(downloaded_files)
+}
+
+async fn apply_latest_files_once(
+    client: &ServerClient,
+    clipboard: &Clipboard,
+    requester_device_id: &DeviceId,
+    last_local_file_write: &Mutex<Option<String>>,
+    identity: &DeviceIdentity,
+    file_policy: &FileTransferPolicy,
+    cache_dir: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let Some(clip) = client.latest_clip().await? else {
+        bail!("no latest clip is available");
+    };
+    if clip.source_device_id == *requester_device_id {
+        bail!("latest file clip was published by this device");
+    }
+
+    let clip_id = clip.clip_id.clone();
+    let source_device_id = clip.source_device_id.clone();
+    let ClipKind::Files(file_clip) = clip.kind else {
+        bail!("latest clip is not a file clip");
+    };
+
+    let pending = PendingFileClip {
+        clip_id,
+        source_device_id,
+        file_clip,
+    };
+    apply_file_clip(
+        client,
+        clipboard,
+        requester_device_id,
+        last_local_file_write,
+        &pending,
+        identity,
+        file_policy,
+        cache_dir,
+    )
+    .await
+}
+
+async fn apply_file_clip(
+    client: &ServerClient,
+    clipboard: &Clipboard,
+    requester_device_id: &DeviceId,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending: &PendingFileClip,
+    identity: &DeviceIdentity,
+    file_policy: &FileTransferPolicy,
+    cache_dir: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    validate_file_clip(&pending.file_clip, file_policy)?;
+
+    let downloaded_files =
+        download_remote_files(client, cache_dir, requester_device_id, identity, pending).await?;
+    if downloaded_files.is_empty() {
+        bail!("remote file clip did not contain downloadable files");
+    }
+
+    clipboard.set_files(&downloaded_files)?;
+    *last_local_file_write.lock().await = clipboard_signature(&downloaded_files);
+    tracing::info!(
+        file_count = downloaded_files.len(),
+        "applied downloaded files to local clipboard"
+    );
+
+    Ok(downloaded_files)
 }
 
 fn validate_file_clip(

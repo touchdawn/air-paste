@@ -94,6 +94,7 @@ File transfer MVP notes:
 - Downloaded files are written under `--cache-dir/<transfer_token>/`.
 - By default, a remote file manifest is only recorded as pending. Press `Ctrl+Shift+V` on the receiver to download the latest pending files, write them to the local clipboard, and send a normal paste.
 - `--auto-apply-files=true` downloads remote files as soon as the manifest arrives. This is mainly useful for smoke tests and debugging.
+- `--apply-latest-files-once` downloads the latest remote file clip once, writes the downloaded file references to the local clipboard, prints the downloaded paths as JSON, and exits. This is useful for macOS hotkey/pasteboard debugging.
 - `--auto-paste-files=true` sends `Ctrl+V` to the current foreground app after an automatic file apply, so keep it disabled unless the receiver is intentionally focused on the target app.
 
 Smoke test:
@@ -102,3 +103,12 @@ Smoke test:
 .\scripts\smoke-agent.ps1
 ```
 
+On macOS:
+
+```bash
+scripts/smoke-agent-macos.sh
+scripts/smoke-agent-macos.sh --auth-token airpaste-smoke-secret
+scripts/smoke-hotkey-macos.sh
+```
+
+`smoke-hotkey-macos.sh` is interactive: it prepares a pending file clip, then waits for you to press `Ctrl+Shift+V`.
