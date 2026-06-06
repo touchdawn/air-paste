@@ -14,6 +14,8 @@ The design goal is:
 Start here:
 
 - [docs/DESIGN.md](docs/DESIGN.md)
+- [docs/SESSION_HANDOFF.md](docs/SESSION_HANDOFF.md)
+- [docs/MACOS_AGENT_PLAN.md](docs/MACOS_AGENT_PLAN.md)
 
 Recommended first implementation step:
 
