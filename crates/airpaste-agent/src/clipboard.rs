@@ -24,4 +24,8 @@ impl Clipboard {
     pub fn get_files(&self) -> anyhow::Result<Option<Vec<std::path::PathBuf>>> {
         anyhow::bail!("file clipboard MVP is currently implemented only on Windows")
     }
+
+    pub fn set_files(&self, _paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
+        anyhow::bail!("file clipboard MVP is currently implemented only on Windows")
+    }
 }

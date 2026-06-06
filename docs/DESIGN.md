@@ -206,6 +206,8 @@ pub struct FileClip {
     pub files: Vec<FileEntry>,
     pub total_size: u64,
     pub transfer_token: TransferToken,
+    pub source_peer_url: Option<String>,
+    pub transfer_expires_at: Option<Timestamp>,
 }
 
 pub struct FileEntry {

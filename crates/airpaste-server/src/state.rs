@@ -8,13 +8,15 @@ use tokio::sync::{broadcast, RwLock};
 pub struct AppState {
     pub store: Store,
     pub hub: EventHub,
+    pub auth_token: Option<String>,
 }
 
 impl AppState {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Store, auth_token: Option<String>) -> Self {
         Self {
             store,
             hub: EventHub::new(),
+            auth_token,
         }
     }
 }

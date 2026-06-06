@@ -20,6 +20,9 @@ struct Args {
 
     #[arg(long, env = "AIRPASTE_DB", default_value = "airpaste.redb")]
     db: PathBuf,
+
+    #[arg(long, env = "AIRPASTE_AUTH_TOKEN")]
+    auth_token: Option<String>,
 }
 
 #[tokio::main]
@@ -35,7 +38,9 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let store = Store::open(&args.db)
         .with_context(|| format!("failed to open database at {}", args.db.display()))?;
-    let state = Arc::new(AppState::new(store));
+    let auth_token = args.auth_token.filter(|token| !token.is_empty());
+    let auth_enabled = auth_token.is_some();
+    let state = Arc::new(AppState::new(store, auth_token));
     let app = router(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
@@ -44,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {}", args.bind))?;
 
-    tracing::info!(bind = %args.bind, "airpaste-server listening");
+    tracing::info!(bind = %args.bind, auth_enabled, "airpaste-server listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await

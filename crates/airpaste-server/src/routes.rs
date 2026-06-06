@@ -7,8 +7,10 @@ use airpaste_protocol::{
     StartPairingResponse,
 };
 use axum::{
+    body::Body,
     extract::{Path, Query, State, WebSocketUpgrade},
-    http::StatusCode,
+    http::{header::AUTHORIZATION, HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -29,6 +31,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/clips/:clip_id", get(get_clip).delete(delete_clip))
         .route("/v1/relay/sessions", post(create_relay_session))
         .route("/v1/ws", get(ws_upgrade))
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state)
 }
 
@@ -190,6 +193,43 @@ async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) ->
     ws.on_upgrade(move |socket| ws_handler(socket, state))
 }
 
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if request.uri().path() == "/health" || request.uri().path() == "/v1/health" {
+        return next.run(request).await;
+    }
+
+    let Some(expected) = state.auth_token.as_deref() else {
+        return next.run(request).await;
+    };
+    let authorized = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|actual| constant_time_eq(actual.as_bytes(), expected.as_bytes()));
+
+    if authorized {
+        next.run(request).await
+    } else {
+        ApiError::unauthorized("missing or invalid bearer token").into_response()
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (left, right) in left.iter().zip(right) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
 fn clip_summary(value: ClipRecord) -> ClipSummary {
     ClipSummary {
         clip_id: value.clip_id,
@@ -212,6 +252,13 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
             message: message.into(),
         }
     }

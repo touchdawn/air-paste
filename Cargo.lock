@@ -18,6 +18,8 @@ dependencies = [
  "airpaste-core",
  "airpaste-protocol",
  "anyhow",
+ "axum",
+ "bytes",
  "chrono",
  "clap",
  "futures-util",

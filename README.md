@@ -41,6 +41,8 @@ cargo +stable-x86_64-pc-windows-gnu run -p airpaste-server -- --bind 0.0.0.0:808
 
 The setup script installs Rust and downloads a portable WinLibs MinGW toolchain under `tools/winlibs` for linking on Windows. Omit `-Proxy` when direct network access works.
 
+For a DDNS/private deployment, start the server with `--auth-token <secret>` or `AIRPASTE_AUTH_TOKEN=<secret>`. Health checks stay public; all other REST and WebSocket APIs require `Authorization: Bearer <secret>`. Agents use the same value with `--auth-token <secret>`.
+
 Useful endpoints:
 
 - `GET /health`
@@ -64,14 +66,28 @@ cargo +stable-x86_64-pc-windows-gnu build -p airpaste-server -p airpaste-agent
 Run the agent against a local server:
 
 ```powershell
-.\target\debug\airpaste-agent.exe --server-url http://127.0.0.1:8080 --state-path .\.airpaste-agent-a.json --device-name "PC A"
+.\target\debug\airpaste-agent.exe --server-url http://127.0.0.1:8080 --state-path .\.airpaste-agent-a.json --device-name "PC A" --auth-token "<secret-if-server-enabled-it>"
 ```
 
 Current agent scope:
 
 - Windows text clipboard publish/apply.
 - Windows file clipboard manifest publish via `CF_HDROP`.
-- File payload transfer and remote paste are not implemented yet.
+- MVP file payload download from source agent peer HTTP service into receiver cache.
+- Downloaded files are written back to the system clipboard as a file drop list.
+- Windows remote file paste hotkey: `Ctrl+Shift+V`.
+
+File transfer MVP notes:
+
+- The source agent exposes `GET /v1/files/{transfer_token}/{index}` on its `--peer-bind` address.
+- The file manifest includes `source_peer_url`; use `--peer-public-url` when another device cannot reach the bind address literally.
+- The peer transfer token has a local TTL, defaults to 600 seconds, and each file index can be downloaded once.
+- File manifest publication is limited by `--max-file-count` and `--max-total-file-bytes`.
+- Only regular files are downloaded in this MVP. Directories are announced in the manifest but skipped by transfer.
+- Downloaded files are written under `--cache-dir/<transfer_token>/`.
+- By default, a remote file manifest is only recorded as pending. Press `Ctrl+Shift+V` on the receiver to download the latest pending files, write them to the local clipboard, and send a normal paste.
+- `--auto-apply-files=true` downloads remote files as soon as the manifest arrives. This is mainly useful for smoke tests and debugging.
+- `--auto-paste-files=true` sends `Ctrl+V` to the current foreground app after an automatic file apply, so keep it disabled unless the receiver is intentionally focused on the target app.
 
 Smoke test:
 

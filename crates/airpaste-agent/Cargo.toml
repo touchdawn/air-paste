@@ -9,6 +9,8 @@ repository.workspace = true
 airpaste-core = { path = "../airpaste-core" }
 airpaste-protocol = { path = "../airpaste-protocol" }
 anyhow.workspace = true
+axum.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 futures-util.workspace = true
@@ -26,5 +28,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }

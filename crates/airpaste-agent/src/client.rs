@@ -3,16 +3,20 @@ use airpaste_protocol::{
     CreateClipRequest, CreateClipResponse, RegisterDeviceRequest, RegisterDeviceResponse,
 };
 use anyhow::Context;
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest, handshake::client::Request, http::header::AUTHORIZATION,
+};
 
 #[derive(Clone)]
 pub struct ServerClient {
     base_url: String,
     ws_url: String,
+    auth_token: Option<String>,
     http: reqwest::Client,
 }
 
 impl ServerClient {
-    pub fn new(base_url: String) -> anyhow::Result<Self> {
+    pub fn new(base_url: String, auth_token: Option<String>) -> anyhow::Result<Self> {
         let base_url = base_url.trim_end_matches('/').to_string();
         let ws_url = if let Some(rest) = base_url.strip_prefix("https://") {
             format!("wss://{rest}/v1/ws")
@@ -25,12 +29,22 @@ impl ServerClient {
         Ok(Self {
             base_url,
             ws_url,
+            auth_token,
             http: reqwest::Client::new(),
         })
     }
 
-    pub fn ws_url(&self) -> &str {
-        &self.ws_url
+    pub fn ws_request(&self) -> anyhow::Result<Request> {
+        let mut request = self.ws_url.as_str().into_client_request()?;
+        if let Some(token) = &self.auth_token {
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse()
+                    .context("invalid auth token header value")?,
+            );
+        }
+        Ok(request)
     }
 
     pub async fn register_device(
@@ -39,8 +53,7 @@ impl ServerClient {
         public_key: String,
     ) -> anyhow::Result<Device> {
         let response = self
-            .http
-            .post(format!("{}/v1/devices", self.base_url))
+            .authorized(self.http.post(format!("{}/v1/devices", self.base_url)))
             .json(&RegisterDeviceRequest { name, public_key })
             .send()
             .await?
@@ -56,8 +69,7 @@ impl ServerClient {
         kind: ClipKind,
         encryption: EncryptionInfo,
     ) -> anyhow::Result<CreateClipResponse> {
-        self.http
-            .post(format!("{}/v1/clips", self.base_url))
+        self.authorized(self.http.post(format!("{}/v1/clips", self.base_url)))
             .json(&CreateClipRequest {
                 source_device_id,
                 expires_at: None,
@@ -73,13 +85,34 @@ impl ServerClient {
     }
 
     pub async fn get_clip(&self, clip_id: ClipId) -> anyhow::Result<ClipRecord> {
+        self.authorized(
+            self.http
+                .get(format!("{}/v1/clips/{}", self.base_url, clip_id.as_str())),
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<ClipRecord>()
+        .await
+        .context("failed to decode clip")
+    }
+
+    pub async fn download_bytes(&self, url: &str) -> anyhow::Result<bytes::Bytes> {
         self.http
-            .get(format!("{}/v1/clips/{}", self.base_url, clip_id.as_str()))
+            .get(url)
             .send()
             .await?
             .error_for_status()?
-            .json::<ClipRecord>()
+            .bytes()
             .await
-            .context("failed to decode clip")
+            .context("failed to download bytes")
+    }
+
+    fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(token) = &self.auth_token {
+            request.bearer_auth(token)
+        } else {
+            request
+        }
     }
 }

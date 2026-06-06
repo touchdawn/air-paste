@@ -9,7 +9,7 @@ use windows_sys::Win32::{
         Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
         Ole::{CF_HDROP, CF_UNICODETEXT},
     },
-    UI::Shell::{DragQueryFileW, HDROP},
+    UI::Shell::{DragQueryFileW, DROPFILES, HDROP},
 };
 
 pub struct Clipboard;
@@ -117,6 +117,66 @@ impl Clipboard {
         }
 
         Ok(Some(files))
+    }
+
+    pub fn set_files(&self, paths: &[PathBuf]) -> anyhow::Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        let mut encoded_paths = Vec::<u16>::new();
+        for path in paths {
+            let path_string = path.to_string_lossy();
+            encoded_paths.extend(OsStr::new(path_string.as_ref()).encode_wide());
+            encoded_paths.push(0);
+        }
+        encoded_paths.push(0);
+
+        let header_size = std::mem::size_of::<DROPFILES>();
+        let paths_byte_len = encoded_paths.len() * std::mem::size_of::<u16>();
+        let total_size = header_size + paths_byte_len;
+
+        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, total_size) };
+        if handle.is_null() {
+            anyhow::bail!("GlobalAlloc failed");
+        }
+
+        let ptr = unsafe { GlobalLock(handle) } as *mut u8;
+        if ptr.is_null() {
+            anyhow::bail!("GlobalLock failed");
+        }
+
+        unsafe {
+            let dropfiles = DROPFILES {
+                pFiles: header_size as u32,
+                pt: Default::default(),
+                fNC: 0,
+                fWide: 1,
+            };
+            ptr::copy_nonoverlapping(
+                &dropfiles as *const DROPFILES as *const u8,
+                ptr,
+                header_size,
+            );
+            ptr::copy_nonoverlapping(
+                encoded_paths.as_ptr() as *const u8,
+                ptr.add(header_size),
+                paths_byte_len,
+            );
+            GlobalUnlock(handle);
+        }
+
+        let _guard = ClipboardGuard::open()?;
+        let emptied = unsafe { EmptyClipboard() != 0 };
+        if !emptied {
+            anyhow::bail!("EmptyClipboard failed");
+        }
+
+        let set = unsafe { SetClipboardData(CF_HDROP.into(), handle) };
+        if set.is_null() {
+            anyhow::bail!("SetClipboardData(CF_HDROP) failed");
+        }
+        Ok(())
     }
 }
 

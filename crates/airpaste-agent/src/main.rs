@@ -1,12 +1,18 @@
 mod client;
 mod clipboard;
 mod config;
+mod hotkey;
+mod paste;
+mod peer;
 mod state_file;
 
 use crate::{
     client::ServerClient,
     clipboard::Clipboard,
     config::Args,
+    hotkey::spawn_remote_paste_listener,
+    paste::PasteSimulator,
+    peer::{run_peer_server, PeerFileRegistry},
     state_file::{AgentState, StateFile},
 };
 use airpaste_core::{
@@ -14,13 +20,26 @@ use airpaste_core::{
     TransferToken,
 };
 use airpaste_protocol::ServerEvent;
-use anyhow::Context;
+use anyhow::{bail, Context};
+use chrono::Duration as ChronoDuration;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use std::{sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[derive(Clone)]
+struct FileTransferPolicy {
+    max_file_count: usize,
+    max_total_file_bytes: u64,
+    transfer_token_ttl: Duration,
+    transfer_token_ttl_secs: u64,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,13 +54,34 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let state_file = StateFile::new(args.state_path.clone());
     let mut state = state_file.load()?;
-    let client = ServerClient::new(args.server_url.clone())?;
+    let auth_token = args.auth_token.clone().filter(|token| !token.is_empty());
+    let client = ServerClient::new(args.server_url.clone(), auth_token)?;
+    let auto_apply_files = args.auto_apply_files;
+    let auto_paste_files = args.auto_paste_files;
+    let transfer_token_ttl_secs = args.transfer_token_ttl_secs.max(1);
+    let file_policy = FileTransferPolicy {
+        max_file_count: args.max_file_count,
+        max_total_file_bytes: args.max_total_file_bytes,
+        transfer_token_ttl: Duration::from_secs(transfer_token_ttl_secs),
+        transfer_token_ttl_secs,
+    };
 
     let device_id = ensure_device(&client, &state_file, &mut state, &args.device_name).await?;
     tracing::info!(%device_id, server = %args.server_url, "agent started");
 
     let clipboard = Arc::new(Clipboard::new());
+    let paste = Arc::new(PasteSimulator::new());
     let last_local_write = Arc::new(Mutex::new(None::<String>));
+    let last_local_file_write = Arc::new(Mutex::new(None::<String>));
+    let pending_file_clip = Arc::new(Mutex::new(None::<FileClip>));
+    let peer_registry = PeerFileRegistry::default();
+    let peer_public_url = args
+        .peer_public_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}", args.peer_bind));
+    let cache_dir = args.cache_dir.clone();
+
+    let peer_task = tokio::spawn(run_peer_server(args.peer_bind, peer_registry.clone()));
 
     let poll_task = if args.publish_clipboard {
         tokio::spawn(poll_clipboard(
@@ -49,6 +89,10 @@ async fn main() -> anyhow::Result<()> {
             clipboard.clone(),
             device_id.clone(),
             last_local_write.clone(),
+            last_local_file_write.clone(),
+            peer_registry,
+            peer_public_url,
+            file_policy.clone(),
             Duration::from_millis(args.poll_ms),
         ))
     } else {
@@ -60,10 +104,19 @@ async fn main() -> anyhow::Result<()> {
         clipboard,
         device_id,
         last_local_write,
+        last_local_file_write,
+        pending_file_clip,
         args.apply_remote,
+        paste,
+        args.remote_paste_hotkey,
+        file_policy,
+        auto_apply_files,
+        auto_paste_files,
+        cache_dir,
     ));
 
     tokio::select! {
+        result = peer_task => result??,
         result = poll_task => result??,
         result = ws_task => result??,
         _ = shutdown_signal() => {
@@ -98,6 +151,10 @@ async fn poll_clipboard(
     clipboard: Arc<Clipboard>,
     device_id: DeviceId,
     last_local_write: Arc<Mutex<Option<String>>>,
+    last_local_file_write: Arc<Mutex<Option<String>>>,
+    peer_registry: PeerFileRegistry,
+    peer_public_url: String,
+    file_policy: FileTransferPolicy,
     interval: Duration,
 ) -> anyhow::Result<()> {
     let mut last_seen = clipboard.get_text().unwrap_or_default();
@@ -109,8 +166,31 @@ async fn poll_clipboard(
         if let Some(files) = clipboard.get_files()? {
             let signature = clipboard_signature(&files);
             if !files.is_empty() && signature != last_seen_files {
+                let ignored = {
+                    let mut guard = last_local_file_write.lock().await;
+                    if guard.as_ref() == signature.as_ref() {
+                        *guard = None;
+                        true
+                    } else {
+                        false
+                    }
+                };
                 last_seen_files = signature;
-                publish_file_manifest(&client, &device_id, files).await?;
+                if ignored {
+                    continue;
+                }
+                if let Err(error) = publish_file_manifest(
+                    &client,
+                    &device_id,
+                    &peer_registry,
+                    &peer_public_url,
+                    &file_policy,
+                    files,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "ignored file clipboard");
+                }
                 continue;
             }
         }
@@ -163,12 +243,24 @@ async fn poll_clipboard(
 async fn publish_file_manifest(
     client: &ServerClient,
     device_id: &DeviceId,
+    peer_registry: &PeerFileRegistry,
+    peer_public_url: &str,
+    file_policy: &FileTransferPolicy,
     paths: Vec<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
+    if paths.len() > file_policy.max_file_count {
+        bail!(
+            "file clipboard contains {} items, above configured limit {}",
+            paths.len(),
+            file_policy.max_file_count
+        );
+    }
+
     let mut files = Vec::with_capacity(paths.len());
     let mut total_size = 0u64;
+    let transfer_token = TransferToken::new();
 
-    for path in paths {
+    for path in &paths {
         let metadata = std::fs::metadata(&path).ok();
         let size = metadata
             .as_ref()
@@ -176,6 +268,13 @@ async fn publish_file_manifest(
             .map(|metadata| metadata.len())
             .unwrap_or(0);
         total_size = total_size.saturating_add(size);
+        if total_size > file_policy.max_total_file_bytes {
+            bail!(
+                "file clipboard is {} bytes, above configured limit {}",
+                total_size,
+                file_policy.max_total_file_bytes
+            );
+        }
 
         let display_name = path
             .file_name()
@@ -198,6 +297,14 @@ async fn publish_file_manifest(
         });
     }
 
+    let transfer_expires_at = airpaste_core::now()
+        + ChronoDuration::seconds(file_policy.transfer_token_ttl_secs.min(i64::MAX as u64) as i64);
+    peer_registry.register(
+        &transfer_token,
+        paths.clone(),
+        file_policy.transfer_token_ttl,
+    )?;
+
     let file_count = files.len();
     let response = client
         .create_clip(
@@ -205,7 +312,9 @@ async fn publish_file_manifest(
             ClipKind::Files(FileClip {
                 files,
                 total_size,
-                transfer_token: TransferToken::new(),
+                transfer_token,
+                source_peer_url: Some(peer_public_url.trim_end_matches('/').to_string()),
+                transfer_expires_at: Some(transfer_expires_at),
             }),
             EncryptionInfo {
                 scheme: "mvp-manifest-placeholder".to_string(),
@@ -241,15 +350,65 @@ async fn run_ws(
     clipboard: Arc<Clipboard>,
     device_id: DeviceId,
     last_local_write: Arc<Mutex<Option<String>>>,
+    last_local_file_write: Arc<Mutex<Option<String>>>,
+    pending_file_clip: Arc<Mutex<Option<FileClip>>>,
     apply_remote: bool,
+    paste: Arc<PasteSimulator>,
+    remote_paste_hotkey: bool,
+    file_policy: FileTransferPolicy,
+    auto_apply_files: bool,
+    auto_paste_files: bool,
+    cache_dir: PathBuf,
 ) -> anyhow::Result<()> {
+    let (hotkey_tx, mut hotkey_rx) = mpsc::unbounded_channel();
+    if remote_paste_hotkey && apply_remote {
+        match spawn_remote_paste_listener(hotkey_tx) {
+            Ok(()) => {
+                let hotkey_client = client.clone();
+                let hotkey_clipboard = clipboard.clone();
+                let hotkey_last_local_file_write = last_local_file_write.clone();
+                let hotkey_pending_file_clip = pending_file_clip.clone();
+                let hotkey_paste = paste.clone();
+                let hotkey_file_policy = file_policy.clone();
+                let hotkey_cache_dir = cache_dir.clone();
+                tokio::spawn(async move {
+                    while hotkey_rx.recv().await.is_some() {
+                        if let Err(error) = apply_pending_file_clip(
+                            &hotkey_client,
+                            &hotkey_clipboard,
+                            &hotkey_last_local_file_write,
+                            &hotkey_pending_file_clip,
+                            &hotkey_paste,
+                            &hotkey_file_policy,
+                            true,
+                            &hotkey_cache_dir,
+                        )
+                        .await
+                        {
+                            tracing::warn!(%error, "remote paste hotkey failed");
+                        }
+                    }
+                    tracing::warn!("remote paste hotkey listener channel closed");
+                });
+            }
+            Err(error) => tracing::warn!(%error, "remote paste hotkey disabled"),
+        }
+    }
+
     loop {
         match run_ws_once(
             &client,
             &clipboard,
             &device_id,
             &last_local_write,
+            &last_local_file_write,
+            &pending_file_clip,
             apply_remote,
+            &paste,
+            &file_policy,
+            auto_apply_files,
+            auto_paste_files,
+            &cache_dir,
         )
         .await
         {
@@ -265,9 +424,16 @@ async fn run_ws_once(
     clipboard: &Clipboard,
     device_id: &DeviceId,
     last_local_write: &Mutex<Option<String>>,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending_file_clip: &Mutex<Option<FileClip>>,
     apply_remote: bool,
+    paste: &PasteSimulator,
+    file_policy: &FileTransferPolicy,
+    auto_apply_files: bool,
+    auto_paste_files: bool,
+    cache_dir: &Path,
 ) -> anyhow::Result<()> {
-    let (ws, _) = tokio_tungstenite::connect_async(client.ws_url()).await?;
+    let (ws, _) = tokio_tungstenite::connect_async(client.ws_request()?).await?;
     let (mut writer, mut reader) = ws.split();
     writer
         .send(Message::Text(serde_json::to_string(
@@ -288,8 +454,15 @@ async fn run_ws_once(
             clipboard,
             device_id,
             last_local_write,
+            last_local_file_write,
+            pending_file_clip,
             event,
             apply_remote,
+            paste,
+            file_policy,
+            auto_apply_files,
+            auto_paste_files,
+            cache_dir,
         )
         .await?;
     }
@@ -301,8 +474,15 @@ async fn handle_server_event(
     clipboard: &Clipboard,
     device_id: &DeviceId,
     last_local_write: &Mutex<Option<String>>,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending_file_clip: &Mutex<Option<FileClip>>,
     event: ServerEvent,
     apply_remote: bool,
+    paste: &PasteSimulator,
+    file_policy: &FileTransferPolicy,
+    auto_apply_files: bool,
+    auto_paste_files: bool,
+    cache_dir: &Path,
 ) -> anyhow::Result<()> {
     match event {
         ServerEvent::ClipCreated {
@@ -335,6 +515,20 @@ async fn handle_server_event(
                 total_size = file_clip.total_size,
                 "remote file clipboard available"
             );
+            *pending_file_clip.lock().await = Some(file_clip);
+            if auto_apply_files {
+                apply_pending_file_clip(
+                    client,
+                    clipboard,
+                    last_local_file_write,
+                    pending_file_clip,
+                    paste,
+                    file_policy,
+                    auto_paste_files,
+                    cache_dir,
+                )
+                .await?;
+            }
         }
         ServerEvent::HelloAck { .. }
         | ServerEvent::DeviceOnline { .. }
@@ -348,6 +542,124 @@ async fn handle_server_event(
         ServerEvent::Error { message } => tracing::warn!(%message, "server event error"),
     }
     Ok(())
+}
+
+async fn apply_pending_file_clip(
+    client: &ServerClient,
+    clipboard: &Clipboard,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending_file_clip: &Mutex<Option<FileClip>>,
+    paste: &PasteSimulator,
+    file_policy: &FileTransferPolicy,
+    paste_after_apply: bool,
+    cache_dir: &Path,
+) -> anyhow::Result<()> {
+    let Some(file_clip) = pending_file_clip.lock().await.clone() else {
+        tracing::info!("remote paste requested with no pending file clip");
+        return Ok(());
+    };
+    validate_file_clip(&file_clip, file_policy)?;
+
+    let downloaded_files = download_remote_files(client, cache_dir, &file_clip).await?;
+    if downloaded_files.is_empty() {
+        bail!("remote file clip did not contain downloadable files");
+    }
+
+    clipboard.set_files(&downloaded_files)?;
+    *last_local_file_write.lock().await = clipboard_signature(&downloaded_files);
+    *pending_file_clip.lock().await = None;
+    tracing::info!(
+        file_count = downloaded_files.len(),
+        "applied downloaded files to local clipboard"
+    );
+    if paste_after_apply {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        paste.paste()?;
+        tracing::info!("sent paste hotkey for downloaded files");
+    }
+
+    Ok(())
+}
+
+fn validate_file_clip(
+    file_clip: &FileClip,
+    file_policy: &FileTransferPolicy,
+) -> anyhow::Result<()> {
+    if file_clip.files.len() > file_policy.max_file_count {
+        bail!(
+            "remote file clip contains {} items, above configured limit {}",
+            file_clip.files.len(),
+            file_policy.max_file_count
+        );
+    }
+    if file_clip.total_size > file_policy.max_total_file_bytes {
+        bail!(
+            "remote file clip is {} bytes, above configured limit {}",
+            file_clip.total_size,
+            file_policy.max_total_file_bytes
+        );
+    }
+    if let Some(expires_at) = &file_clip.transfer_expires_at {
+        if expires_at < &airpaste_core::now() {
+            bail!("remote file clip transfer token expired at {expires_at}");
+        }
+    }
+    Ok(())
+}
+
+async fn download_remote_files(
+    client: &ServerClient,
+    cache_dir: &Path,
+    file_clip: &FileClip,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let Some(source_peer_url) = &file_clip.source_peer_url else {
+        bail!("remote file clip has no source_peer_url");
+    };
+
+    let clip_cache_dir = cache_dir.join(file_clip.transfer_token.as_str());
+    tokio::fs::create_dir_all(&clip_cache_dir).await?;
+    let mut downloaded_files = Vec::new();
+
+    for (index, entry) in file_clip.files.iter().enumerate() {
+        if !matches!(entry.kind, FileEntryKind::File) {
+            tracing::warn!(
+                relative_path = %entry.relative_path,
+                "skipping non-file entry in MVP transfer"
+            );
+            continue;
+        }
+
+        let url = format!(
+            "{}/v1/files/{}/{}",
+            source_peer_url.trim_end_matches('/'),
+            file_clip.transfer_token.as_str(),
+            index
+        );
+        let bytes = client.download_bytes(&url).await?;
+        let destination = safe_cache_path(&clip_cache_dir, &entry.display_name);
+        tokio::fs::write(&destination, bytes).await?;
+        tracing::info!(path = %destination.display(), "downloaded remote file");
+        downloaded_files.push(destination);
+    }
+
+    Ok(downloaded_files)
+}
+
+fn safe_cache_path(cache_dir: &Path, display_name: &str) -> PathBuf {
+    let sanitized = display_name
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '/' | '\\' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    let file_name = if sanitized.trim().is_empty() {
+        "download.bin"
+    } else {
+        sanitized.trim()
+    };
+    cache_dir.join(file_name)
 }
 
 async fn shutdown_signal() {
