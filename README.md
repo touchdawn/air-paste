@@ -45,6 +45,8 @@ The setup script installs Rust and downloads a portable WinLibs MinGW toolchain 
 
 For a DDNS/private deployment, start the server with `--auth-token <secret>` or `AIRPASTE_AUTH_TOKEN=<secret>`. Health checks stay public; all other REST and WebSocket APIs require `Authorization: Bearer <secret>`. Agents use the same value with `--auth-token <secret>`.
 
+Sensitive server APIs also require the request device to be trusted and to prove possession of its Ed25519 private key. Agents sign REST and WebSocket requests with `x-airpaste-device-id`, `x-airpaste-signature-alg`, `x-airpaste-timestamp`, `x-airpaste-nonce`, `x-airpaste-body-sha256`, and `x-airpaste-signature`. The first registered device in a fresh database is trusted for bootstrap; later devices must be paired before they can list devices, create/read clips, open WebSocket sync, or create relay sessions. Device registration and pair confirmation remain available to untrusted devices.
+
 Useful endpoints:
 
 - `GET /health`
@@ -71,7 +73,7 @@ Run the agent against a local server:
 .\target\debug\airpaste-agent.exe --server-url http://127.0.0.1:8080 --state-path .\.airpaste-agent-a.json --device-name "PC A" --auth-token "<secret-if-server-enabled-it>"
 ```
 
-To join a non-first device, create a pairing code through `POST /v1/pair/start`, then start the new agent with `--pair-code <code>`. The first registered device in a fresh database is trusted automatically for bootstrap.
+To join a non-first device, create a pairing code through `POST /v1/pair/start` from an already trusted device, then start the new agent with `--pair-code <code>`. The first registered device in a fresh database is trusted automatically for bootstrap.
 
 Current agent scope:
 

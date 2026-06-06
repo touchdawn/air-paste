@@ -14,6 +14,37 @@ pub struct Args {
     #[arg(long, env = "AIRPASTE_PAIR_CODE")]
     pub pair_code: Option<String>,
 
+    #[arg(long, env = "AIRPASTE_CREATE_PAIR_CODE", default_value_t = false)]
+    pub create_pair_code: bool,
+
+    #[arg(long, env = "AIRPASTE_PAIR_TTL_SECONDS")]
+    pub pair_ttl_seconds: Option<i64>,
+
+    #[arg(long, env = "AIRPASTE_PRINT_LATEST_CLIP", default_value_t = false)]
+    pub print_latest_clip: bool,
+
+    #[arg(
+        long,
+        env = "AIRPASTE_REPLAY_LATEST_CLIP_SIGNATURE",
+        default_value_t = false
+    )]
+    pub replay_latest_clip_signature: bool,
+
+    #[arg(long, env = "AIRPASTE_PUBLISH_TEXT_ONCE")]
+    pub publish_text_once: Option<String>,
+
+    #[arg(long, env = "AIRPASTE_CREATE_RELAY_FOR_CLIP")]
+    pub create_relay_for_clip: Option<String>,
+
+    #[arg(long, env = "AIRPASTE_RELAY_RECIPIENT_DEVICE_ID")]
+    pub relay_recipient_device_id: Option<String>,
+
+    #[arg(long, env = "AIRPASTE_RELAY_MAX_BYTES")]
+    pub relay_max_bytes: Option<u64>,
+
+    #[arg(long, env = "AIRPASTE_RELAY_TTL_SECONDS")]
+    pub relay_ttl_seconds: Option<i64>,
+
     #[arg(long, env = "AIRPASTE_DEVICE_NAME", default_value = "Windows Agent")]
     pub device_name: String,
 

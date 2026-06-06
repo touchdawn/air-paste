@@ -40,6 +40,7 @@ cargo +stable-x86_64-pc-windows-gnu check
 cargo +stable-x86_64-pc-windows-gnu build -p airpaste-agent -p airpaste-server
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1 -Bind 127.0.0.1:18082 -AuthToken airpaste-smoke-secret
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-server.ps1
 ```
 
 Known harmless warning:
@@ -73,13 +74,18 @@ Auth:
 - `--auth-token <secret>` or `AIRPASTE_AUTH_TOKEN=<secret>` enables Bearer-token protection.
 - `/health` and `/v1/health` stay public.
 - Other REST and WebSocket routes require `Authorization: Bearer <secret>`.
+- Sensitive REST routes and WebSocket upgrade also require a registered trusted `x-airpaste-device-id` plus an Ed25519 request signature.
+- REST/WS request signatures use `x-airpaste-signature-alg`, `x-airpaste-timestamp`, `x-airpaste-nonce`, `x-airpaste-body-sha256`, and `x-airpaste-signature`.
+- The signature message covers HTTP method, path/query, device ID, timestamp, nonce, and body SHA-256. The server rejects stale timestamps and replayed nonces.
 
 Pairing/trust:
 
 - The first registered device in a fresh DB is automatically trusted for bootstrap.
 - Later devices register as untrusted.
 - A non-first agent can confirm pairing by starting with `--pair-code <code>`.
-- Pairing code creation is still API-only through `POST /v1/pair/start`.
+- Pairing code creation is still API-only through `POST /v1/pair/start`, but that route now requires a trusted request device.
+- Untrusted devices may register and confirm pairing, but cannot list devices, create/read clips, list history, open WebSocket sync, or create relay sessions until trusted.
+- `POST /v1/devices` registration and `POST /v1/pair/confirm` remain usable by untrusted devices.
 
 ## Current Windows Agent Behavior
 
@@ -159,6 +165,7 @@ Smoke coverage:
 - File peer download.
 - Local file clipboard write.
 - Server auth token path.
+- Trusted-device signed API guard path: missing signature returns `401`, untrusted signed request returns `403`, paired signed request is allowed, replayed nonce returns `401`.
 - Peer unauthenticated request returns `401`.
 - Repeated file index download returns `410`.
 
@@ -168,8 +175,7 @@ Security and trust:
 
 - Text clips are still inline plaintext placeholders, not real end-to-end encrypted payloads.
 - The server can still store and return plaintext text clips.
-- Server API permission checks are not yet narrowed by trusted device status. This should be the next server-side hardening step.
-- Pairing code creation is not yet tied to an authenticated trusted device beyond the deployment token.
+- REST signatures currently use an in-memory nonce cache, so replay protection resets when the server restarts.
 - There is no UI fingerprint comparison for device public keys.
 
 Transfer:
@@ -189,28 +195,7 @@ Platform:
 
 ## Recommended Next Steps
 
-### 1. Restrict Server APIs By Trust
-
-This is the highest-priority next step.
-
-Expected rule:
-
-- Untrusted devices may register and confirm pairing.
-- Trusted devices may create clips, read clips, list history, open WebSocket sync, create relay sessions, and participate in file transfer.
-
-Likely implementation:
-
-- Add a request identity mechanism for REST and WebSocket.
-- For MVP, accept a `device_id` field/header and validate that the device exists and is trusted.
-- Better follow-up: require request signing with the agent Ed25519 key for sensitive REST calls too.
-
-Be careful:
-
-- Do not break first-device bootstrap.
-- Do not block `/v1/pair/confirm` for untrusted devices.
-- Smoke tests need a pairing step for any non-first agent that needs file transfer.
-
-### 2. Make Text Less Dangerous
+### 1. Make Text Less Dangerous
 
 Current text sync is functionally useful but security-weak.
 
@@ -220,7 +205,7 @@ Options:
 - Add local sensitive-text filters.
 - Add real E2EE content encryption using trusted device public keys.
 
-### 3. Improve File Data Plane
+### 2. Improve File Data Plane
 
 Useful incremental improvements:
 
@@ -229,9 +214,8 @@ Useful incremental improvements:
 - Add SHA-256 while streaming, or at least optional post-download size verification.
 - Add directory walking with file count and total-size caps.
 
-### 4. Start macOS Agent
+### 3. Start macOS Agent
 
 See `docs/MACOS_AGENT_PLAN.md`.
 
 The best approach is to add macOS implementations behind the existing agent abstractions instead of starting a separate product.
-

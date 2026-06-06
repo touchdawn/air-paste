@@ -274,7 +274,7 @@ For a hotkey smoke, start the receiver without `--auto-apply-files=true`, publis
 
 Pair a second agent/device:
 
-1. Create a pair code with `POST /v1/pair/start`.
+1. Create a pair code with `POST /v1/pair/start` from an already trusted device.
 2. Run the second agent with `--pair-code <code>`.
 
 Cross-platform smoke target:

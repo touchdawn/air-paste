@@ -4,81 +4,138 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$agentExe = Join-Path $root "target\debug\airpaste-agent.exe"
+$trustedState = Join-Path $root "target\server-smoke-trusted.json"
+$untrustedState = Join-Path $root "target\server-smoke-untrusted.json"
+$untrustedError = Join-Path $root "target\server-smoke-untrusted.err"
 $authHeaders = @{}
+$authArgs = @()
 if ($AuthToken) {
     $authHeaders["Authorization"] = "Bearer $AuthToken"
+    $authArgs = @("--auth-token", $AuthToken)
 }
 
-Write-Host "Health"
-Invoke-RestMethod "$BaseUrl/health" | ConvertTo-Json -Depth 20
-
-if ($AuthToken) {
-    Write-Host "Auth guard"
+function Expect-HttpStatus([int]$ExpectedStatus, [scriptblock]$Action) {
     try {
-        Invoke-RestMethod "$BaseUrl/v1/devices" | Out-Null
-        throw "auth smoke failed: unauthenticated request succeeded"
+        & $Action
+        throw "request unexpectedly succeeded"
     }
     catch {
         $statusCode = $null
         if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
             $statusCode = [int]$_.Exception.Response.StatusCode
         }
-        if ($statusCode -ne 401) {
+        if ($statusCode -ne $ExpectedStatus) {
             throw
         }
     }
 }
 
+function Get-AgentDeviceId([string]$StatePath) {
+    if (!(Test-Path -LiteralPath $StatePath)) {
+        throw "agent state missing: $StatePath"
+    }
+    $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+    if (!$state.device_id) {
+        throw "agent state does not contain device_id: $StatePath"
+    }
+    return [string]$state.device_id
+}
+
+function Invoke-AgentJson([string[]]$ArgsList) {
+    $json = & $agentExe @ArgsList
+    if ($LASTEXITCODE -ne 0) {
+        throw "agent command failed: $($ArgsList -join ' ')"
+    }
+    return $json | ConvertFrom-Json
+}
+
+function Invoke-AgentOneShot([string]$StatePath, [string[]]$ExtraArgs) {
+    $args = @(
+        "--server-url", $BaseUrl,
+        "--state-path", $StatePath,
+        "--publish-clipboard=false",
+        "--apply-remote=false",
+        "--remote-paste-hotkey=false"
+    ) + $authArgs + $ExtraArgs
+    return Invoke-AgentJson $args
+}
+
+Remove-Item -Force -ErrorAction SilentlyContinue $trustedState, $untrustedState, $untrustedError
+
+Write-Host "Health"
+Invoke-RestMethod "$BaseUrl/health" | ConvertTo-Json -Depth 20
+
+if ($AuthToken) {
+    Write-Host "Auth guard"
+    Expect-HttpStatus 401 {
+        Invoke-RestMethod "$BaseUrl/v1/devices" | Out-Null
+    }
+}
+
 Write-Host "Register device"
-$device = Invoke-RestMethod "$BaseUrl/v1/devices" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-    name = "smoke-device"
-    public_key = "test-public-key"
-} | ConvertTo-Json)
-$device | ConvertTo-Json -Depth 20
+Invoke-AgentOneShot $trustedState @("--print-latest-clip", "--device-name", "smoke-device") | ConvertTo-Json -Depth 20
+$deviceId = Get-AgentDeviceId $trustedState
+
+Write-Host "Trusted device guard"
+Expect-HttpStatus 401 {
+    Invoke-RestMethod "$BaseUrl/v1/clips/latest" -Headers $authHeaders | Out-Null
+}
 
 Write-Host "Start pairing"
-$pair = Invoke-RestMethod "$BaseUrl/v1/pair/start" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-    created_by = $null
-    ttl_seconds = 600
-} | ConvertTo-Json)
+$pair = Invoke-AgentOneShot $trustedState @("--create-pair-code", "--pair-ttl-seconds", "600")
 $pair | ConvertTo-Json -Depth 20
+
+Write-Host "Untrusted device guard"
+try {
+    $args = @(
+        "--server-url", $BaseUrl,
+        "--state-path", $untrustedState,
+        "--publish-clipboard=false",
+        "--apply-remote=false",
+        "--remote-paste-hotkey=false",
+        "--print-latest-clip",
+        "--device-name", "smoke-untrusted"
+    ) + $authArgs
+    & $agentExe @args 2> $untrustedError | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        $errorText = Get-Content -LiteralPath $untrustedError -Raw
+        if ($errorText -notmatch "403 Forbidden") {
+            throw "expected untrusted device to fail with 403, got: $errorText"
+        }
+        throw "untrusted device was rejected"
+    }
+    throw "untrusted device unexpectedly read latest clip"
+}
+catch {
+    if ($_.Exception.Message -like "untrusted device unexpectedly*") {
+        throw
+    }
+}
+$untrustedDeviceId = Get-AgentDeviceId $untrustedState
 
 Write-Host "Confirm pairing"
 Invoke-RestMethod "$BaseUrl/v1/pair/confirm" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
     code = $pair.code
-    device_id = $device.device.device_id
+    device_id = $untrustedDeviceId
 } | ConvertTo-Json) | ConvertTo-Json -Depth 20
+Invoke-AgentOneShot $untrustedState @("--print-latest-clip") | ConvertTo-Json -Depth 20
 
 Write-Host "Create text clip"
-$clip = Invoke-RestMethod "$BaseUrl/v1/clips" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-    source_device_id = $device.device.device_id
-    expires_at = $null
-    kind = @{
-        text = @{
-            utf8_len = 11
-            preview = $null
-            encrypted_body_ref = @{
-                id = "blob_smoke"
-                byte_len = 32
-            }
-            encrypted_inline_body = "hello smoke"
-        }
-    }
-    encryption = @{
-        scheme = "mvp-placeholder"
-        key_wrapped_for = @($device.device.device_id)
-    }
-} | ConvertTo-Json -Depth 20)
+$clip = Invoke-AgentOneShot $trustedState @("--publish-text-once", "hello smoke")
 $clip | ConvertTo-Json -Depth 20
 
 Write-Host "Latest clip"
-Invoke-RestMethod "$BaseUrl/v1/clips/latest" -Headers $authHeaders | ConvertTo-Json -Depth 20
+Invoke-AgentOneShot $untrustedState @("--print-latest-clip") | ConvertTo-Json -Depth 20
+
+Write-Host "Replay guard"
+Invoke-AgentOneShot $trustedState @("--replay-latest-clip-signature") | ConvertTo-Json -Depth 20
 
 Write-Host "Create relay session"
-Invoke-RestMethod "$BaseUrl/v1/relay/sessions" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-    clip_id = $clip.clip_id
-    source_device_id = $device.device.device_id
-    recipient_device_id = $device.device.device_id
-    max_bytes = 1048576
-    ttl_seconds = 600
-} | ConvertTo-Json) | ConvertTo-Json -Depth 20
+Invoke-AgentOneShot $trustedState @(
+    "--create-relay-for-clip", $clip.clip_id,
+    "--relay-recipient-device-id", $untrustedDeviceId,
+    "--relay-max-bytes", "1048576",
+    "--relay-ttl-seconds", "600"
+) | ConvertTo-Json -Depth 20

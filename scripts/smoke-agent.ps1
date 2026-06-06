@@ -22,6 +22,69 @@ if ($AuthToken) {
     $authArgs = @("--auth-token", $AuthToken)
 }
 
+function Expect-HttpStatus([int]$ExpectedStatus, [scriptblock]$Action) {
+    try {
+        & $Action
+        throw "request unexpectedly succeeded"
+    }
+    catch {
+        $statusCode = $null
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+        }
+        if ($statusCode -ne $ExpectedStatus) {
+            throw
+        }
+    }
+}
+
+function Get-AgentDeviceId([string]$StatePath) {
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $StatePath) {
+            $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+            if ($state.device_id) {
+                return [string]$state.device_id
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "agent did not write device_id to $StatePath"
+}
+
+function New-PairCode {
+    $args = @(
+        "--server-url", $baseUrl,
+        "--state-path", $publishState,
+        "--create-pair-code",
+        "--pair-ttl-seconds", "600",
+        "--publish-clipboard=false",
+        "--apply-remote=false",
+        "--remote-paste-hotkey=false"
+    ) + $authArgs
+    $json = & $agentExe @args
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to create pair code"
+    }
+    return $json | ConvertFrom-Json
+}
+
+function Get-LatestClip() {
+    $args = @(
+        "--server-url", $baseUrl,
+        "--state-path", $publishState,
+        "--print-latest-clip",
+        "--publish-clipboard=false",
+        "--apply-remote=false",
+        "--remote-paste-hotkey=false"
+    ) + $authArgs
+    $json = & $agentExe @args
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to read latest clip"
+    }
+    return $json | ConvertFrom-Json
+}
+
 Remove-Item -Force -Recurse -ErrorAction SilentlyContinue $db, $publishState, $applyState, $filePublishState, $fileReceiveState, $fileReceiveCache
 
 $serverArgs = @("--bind", $Bind, "--db", $db) + $authArgs
@@ -32,18 +95,8 @@ try {
     Invoke-RestMethod "$baseUrl/health" | Out-Null
     if ($AuthToken) {
         Write-Host "Auth guard"
-        try {
+        Expect-HttpStatus 401 {
             Invoke-RestMethod "$baseUrl/v1/devices" | Out-Null
-            throw "auth smoke failed: unauthenticated request succeeded"
-        }
-        catch {
-            $statusCode = $null
-            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-                $statusCode = [int]$_.Exception.Response.StatusCode
-            }
-            if ($statusCode -ne 401) {
-                throw
-            }
         }
     }
 
@@ -53,68 +106,51 @@ try {
         "--device-name", "smoke-publisher",
         "--state-path", $publishState,
         "--apply-remote=false",
-        "--remote-paste-hotkey=false"
+        "--remote-paste-hotkey=false",
+        "--peer-bind", "127.0.0.1:17388"
     ) + $authArgs
     $publisher = Start-Process -FilePath $agentExe -ArgumentList $publisherArgs -WorkingDirectory $root -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
+    $publisherDeviceId = Get-AgentDeviceId $publishState
+    Expect-HttpStatus 401 {
+        Invoke-RestMethod "$baseUrl/v1/clips/latest" -Headers $authHeaders | Out-Null
+    }
     $publishText = "airpaste publish smoke $(Get-Date -Format o)"
     Set-Clipboard -Value $publishText
     Start-Sleep -Seconds 2
-    $latest = Invoke-RestMethod "$baseUrl/v1/clips/latest" -Headers $authHeaders
+    $latest = Get-LatestClip
     if ($latest.kind.text.encrypted_inline_body -ne $publishText) {
         throw "publish smoke failed"
     }
-    Stop-Process -Id $publisher.Id -Force
 
     Write-Host "Apply path"
+    $applierPair = New-PairCode
     $applierArgs = @(
         "--server-url", $baseUrl,
         "--device-name", "smoke-applier",
         "--state-path", $applyState,
+        "--pair-code", $applierPair.code,
         "--publish-clipboard=false",
-        "--remote-paste-hotkey=false"
+        "--remote-paste-hotkey=false",
+        "--peer-bind", "127.0.0.1:17389"
     ) + $authArgs
     $applier = Start-Process -FilePath $agentExe -ArgumentList $applierArgs -WorkingDirectory $root -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
-
-    $source = Invoke-RestMethod "$baseUrl/v1/devices" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-        name = "smoke-remote-source"
-        public_key = "smoke-key"
-    } | ConvertTo-Json)
+    $applierDeviceId = Get-AgentDeviceId $applyState
 
     $applyText = "airpaste apply smoke $(Get-Date -Format o)"
-    Invoke-RestMethod "$baseUrl/v1/clips" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-        source_device_id = $source.device.device_id
-        expires_at = $null
-        kind = @{
-            text = @{
-                utf8_len = [Text.Encoding]::UTF8.GetByteCount($applyText)
-                preview = $null
-                encrypted_body_ref = @{
-                    id = "inline:smoke"
-                    byte_len = [Text.Encoding]::UTF8.GetByteCount($applyText)
-                }
-                encrypted_inline_body = $applyText
-            }
-        }
-        encryption = @{
-            scheme = "mvp-inline-placeholder"
-            key_wrapped_for = @()
-        }
-    } | ConvertTo-Json -Depth 20) | Out-Null
+    Set-Clipboard -Value $applyText
 
     Start-Sleep -Seconds 2
     $clipboard = Get-Clipboard -Raw
     if ($clipboard.TrimEnd() -ne $applyText) {
         throw "apply smoke failed: clipboard was '$clipboard'"
     }
-    Stop-Process -Id $applier.Id -Force
+    Stop-Process -Id $applier.Id -Force -ErrorAction SilentlyContinue
+    Stop-Process -Id $publisher.Id -Force -ErrorAction SilentlyContinue
 
     Write-Host "File manifest path"
-    $fileReceiverPair = Invoke-RestMethod "$baseUrl/v1/pair/start" -Method Post -Headers $authHeaders -ContentType "application/json" -Body (@{
-        created_by = $null
-        ttl_seconds = 600
-    } | ConvertTo-Json)
+    $fileReceiverPair = New-PairCode
     $fileReceiverArgs = @(
         "--server-url", $baseUrl,
         "--device-name", "smoke-file-receiver",
@@ -128,10 +164,12 @@ try {
     ) + $authArgs
     $fileReceiver = Start-Process -FilePath $agentExe -ArgumentList $fileReceiverArgs -WorkingDirectory $root -WindowStyle Hidden -PassThru
 
+    $filePublisherPair = New-PairCode
     $filePublisherArgs = @(
         "--server-url", $baseUrl,
         "--device-name", "smoke-file-publisher",
         "--state-path", $filePublishState,
+        "--pair-code", $filePublisherPair.code,
         "--apply-remote=false",
         "--remote-paste-hotkey=false",
         "--peer-bind", "127.0.0.1:17391",
@@ -145,7 +183,8 @@ try {
     Set-Content -LiteralPath $sampleFile -Value $sampleContent -NoNewline
     Set-Clipboard -LiteralPath $sampleFile
     Start-Sleep -Seconds 2
-    $fileClip = Invoke-RestMethod "$baseUrl/v1/clips/latest" -Headers $authHeaders
+    $fileReceiverDeviceId = Get-AgentDeviceId $fileReceiveState
+    $fileClip = Get-LatestClip
     if ($null -eq $fileClip.kind.files) {
         throw "file manifest smoke failed: latest clip was not files"
     }
@@ -185,8 +224,8 @@ try {
     if ($clipboardFiles[0].FullName -ne $downloaded) {
         throw "file clipboard smoke failed: expected '$downloaded', got '$($clipboardFiles[0].FullName)'"
     }
-    Stop-Process -Id $filePublisher.Id -Force
-    Stop-Process -Id $fileReceiver.Id -Force
+    Stop-Process -Id $filePublisher.Id -Force -ErrorAction SilentlyContinue
+    Stop-Process -Id $fileReceiver.Id -Force -ErrorAction SilentlyContinue
 
     Write-Host "Agent smoke passed"
 }

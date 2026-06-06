@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::broadcast;
 
-pub async fn ws_handler(socket: WebSocket, state: Arc<AppState>) {
+pub async fn ws_handler(socket: WebSocket, state: Arc<AppState>, request_device_id: DeviceId) {
     let (mut sender, mut receiver) = socket.split();
     let Some(Ok(Message::Text(first))) = receiver.next().await else {
         return;
@@ -23,6 +23,18 @@ pub async fn ws_handler(socket: WebSocket, state: Arc<AppState>) {
             .await;
         return;
     };
+
+    if device_id != request_device_id {
+        let _ = sender
+            .send(Message::Text(
+                serde_json::to_string(&ServerEvent::Error {
+                    message: "hello device does not match request device".to_string(),
+                })
+                .unwrap(),
+            ))
+            .await;
+        return;
+    }
 
     let _ = state.store.touch_device(&device_id);
     state.hub.broadcast(ServerEvent::DeviceOnline {

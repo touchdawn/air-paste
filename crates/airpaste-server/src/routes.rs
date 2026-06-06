@@ -1,22 +1,30 @@
 use crate::{state::AppState, store::StoreError, ws::ws_handler};
-use airpaste_core::{now, ClipId, ClipRecord};
+use airpaste_core::{now, ClipId, ClipRecord, Device, DeviceId};
 use airpaste_protocol::{
-    ClipSummary, ConfirmPairingRequest, ConfirmPairingResponse, CreateClipRequest,
-    CreateClipResponse, CreateRelaySessionRequest, CreateRelaySessionResponse, HealthResponse,
-    RegisterDeviceRequest, RegisterDeviceResponse, ServerEvent, StartPairingRequest,
-    StartPairingResponse,
+    rest_body_sha256_base64url, rest_signing_message, ClipSummary, ConfirmPairingRequest,
+    ConfirmPairingResponse, CreateClipRequest, CreateClipResponse, CreateRelaySessionRequest,
+    CreateRelaySessionResponse, HealthResponse, RegisterDeviceRequest, RegisterDeviceResponse,
+    ServerEvent, StartPairingRequest, StartPairingResponse, AIRPASTE_BODY_SHA256_HEADER,
+    AIRPASTE_DEVICE_ID_HEADER, AIRPASTE_NONCE_HEADER, AIRPASTE_REST_SIGNATURE_ALG,
+    AIRPASTE_SIGNATURE_ALG_HEADER, AIRPASTE_SIGNATURE_HEADER, AIRPASTE_TIMESTAMP_HEADER,
 };
 use axum::{
-    body::Body,
-    extract::{Path, Query, State, WebSocketUpgrade},
-    http::{header::AUTHORIZATION, HeaderMap, Request, StatusCode},
+    body::{to_bytes, Body},
+    extract::{FromRequestParts, Path, Query, State, WebSocketUpgrade},
+    http::{header::AUTHORIZATION, request::Parts, HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+
+const MAX_SIGNED_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REST_SIGNATURE_SKEW: Duration = Duration::from_secs(300);
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -56,17 +64,26 @@ async fn register_device(
 
 async fn list_devices(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
 ) -> ApiResult<Json<Vec<airpaste_core::Device>>> {
     Ok(Json(state.store.list_devices().map_err(ApiError::from)?))
 }
 
 async fn start_pairing(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
     Json(request): Json<StartPairingRequest>,
 ) -> ApiResult<Json<StartPairingResponse>> {
+    if let Some(created_by) = &request.created_by {
+        if created_by != &request_device.device_id {
+            return Err(ApiError::forbidden(
+                "pairing creator must match request device",
+            ));
+        }
+    }
     let session = state
         .store
-        .start_pairing(request.created_by, request.ttl_seconds)
+        .start_pairing(Some(request_device.device_id), request.ttl_seconds)
         .map_err(ApiError::from)?;
     Ok(Json(StartPairingResponse {
         code: session.code,
@@ -90,8 +107,14 @@ async fn confirm_pairing(
 
 async fn create_clip(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
     Json(request): Json<CreateClipRequest>,
 ) -> ApiResult<Json<CreateClipResponse>> {
+    if request.source_device_id != request_device.device_id {
+        return Err(ApiError::forbidden(
+            "clip source device must match request device",
+        ));
+    }
     let clip = ClipRecord {
         clip_id: ClipId::new(),
         source_device_id: request.source_device_id,
@@ -115,6 +138,7 @@ async fn create_clip(
 
 async fn get_clip(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
     Path(clip_id): Path<String>,
 ) -> ApiResult<Json<ClipRecord>> {
     let clip_id = ClipId::from(clip_id);
@@ -126,7 +150,10 @@ async fn get_clip(
         .ok_or(ApiError::not_found("clip not found"))
 }
 
-async fn latest_clip(State(state): State<Arc<AppState>>) -> ApiResult<Json<Option<ClipRecord>>> {
+async fn latest_clip(
+    State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
+) -> ApiResult<Json<Option<ClipRecord>>> {
     Ok(Json(state.store.latest_clip().map_err(ApiError::from)?))
 }
 
@@ -137,6 +164,7 @@ struct HistoryQuery {
 
 async fn clip_history(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
     Query(query): Query<HistoryQuery>,
 ) -> ApiResult<Json<Vec<ClipSummary>>> {
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
@@ -146,6 +174,7 @@ async fn clip_history(
 
 async fn delete_clip(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
     Path(clip_id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let removed = state
@@ -161,8 +190,19 @@ async fn delete_clip(
 
 async fn create_relay_session(
     State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
     Json(request): Json<CreateRelaySessionRequest>,
 ) -> ApiResult<Json<CreateRelaySessionResponse>> {
+    if request.source_device_id != request_device.device_id
+        && request.recipient_device_id != request_device.device_id
+    {
+        return Err(ApiError::forbidden(
+            "relay requester must be the source or recipient device",
+        ));
+    }
+    ensure_trusted_device(&state, &request.source_device_id)?;
+    ensure_trusted_device(&state, &request.recipient_device_id)?;
+
     let relay = state
         .store
         .create_relay_session(
@@ -189,8 +229,12 @@ async fn create_relay_session(
     Ok(Json(CreateRelaySessionResponse { relay }))
 }
 
-async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| ws_handler(socket, state))
+async fn ws_upgrade(
+    State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| ws_handler(socket, state, request_device.device_id))
 }
 
 async fn require_auth(
@@ -203,19 +247,25 @@ async fn require_auth(
         return next.run(request).await;
     }
 
-    let Some(expected) = state.auth_token.as_deref() else {
-        return next.run(request).await;
-    };
-    let authorized = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|actual| constant_time_eq(actual.as_bytes(), expected.as_bytes()));
+    if let Some(expected) = state.auth_token.as_deref() {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|actual| constant_time_eq(actual.as_bytes(), expected.as_bytes()));
 
-    if authorized {
-        next.run(request).await
-    } else {
-        ApiError::unauthorized("missing or invalid bearer token").into_response()
+        if !authorized {
+            return ApiError::unauthorized("missing or invalid bearer token").into_response();
+        }
+    }
+
+    if !requires_device_signature(request.method().as_str(), request.uri().path()) {
+        return next.run(request).await;
+    }
+
+    match verify_signed_request(&state, &headers, request).await {
+        Ok(request) => next.run(request).await,
+        Err(error) => error.into_response(),
     }
 }
 
@@ -242,6 +292,195 @@ fn clip_summary(value: ClipRecord) -> ClipSummary {
 
 type ApiResult<T> = Result<T, ApiError>;
 
+#[derive(Clone)]
+struct VerifiedDevice(Device);
+
+struct TrustedDevice(Device);
+
+#[axum::async_trait]
+impl FromRequestParts<Arc<AppState>> for TrustedDevice {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if let Some(verified) = parts.extensions.get::<VerifiedDevice>() {
+            return Ok(Self(verified.0.clone()));
+        }
+
+        Err(ApiError::unauthorized("missing verified device signature"))
+    }
+}
+
+fn ensure_trusted_device(state: &AppState, device_id: &DeviceId) -> ApiResult<Device> {
+    let device = state
+        .store
+        .get_device(device_id)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::not_found("device not found"))?;
+    if !device.trusted {
+        return Err(ApiError::forbidden("device is not trusted"));
+    }
+    Ok(device)
+}
+
+fn requires_device_signature(method: &str, path: &str) -> bool {
+    !(method == "POST" && (path == "/v1/devices" || path == "/v1/pair/confirm"))
+}
+
+async fn verify_signed_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: Request<Body>,
+) -> ApiResult<Request<Body>> {
+    let (mut parts, body) = request.into_parts();
+    let body = to_bytes(body, MAX_SIGNED_BODY_BYTES)
+        .await
+        .map_err(|_| ApiError::bad_request("failed to read request body"))?;
+    let signed_headers = SignedRequestHeaders::from_headers(headers)?;
+    let body_sha256 = rest_body_sha256_base64url(&body);
+    if body_sha256 != signed_headers.body_sha256 {
+        return Err(ApiError::unauthorized("request body hash mismatch"));
+    }
+
+    let device = validate_trusted_device(state, &signed_headers.device_id)?;
+    validate_timestamp(&signed_headers.timestamp)?;
+    verify_rest_signature(
+        &device,
+        parts.method.as_str(),
+        parts
+            .uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or(parts.uri.path()),
+        &signed_headers,
+    )?;
+    if !state
+        .record_nonce(&signed_headers.device_id, &signed_headers.nonce)
+        .await
+    {
+        return Err(ApiError::unauthorized("request nonce was already used"));
+    }
+
+    parts.extensions.insert(VerifiedDevice(device));
+    Ok(Request::from_parts(parts, Body::from(body)))
+}
+
+fn validate_trusted_device(state: &AppState, device_id: &DeviceId) -> ApiResult<Device> {
+    let device = state
+        .store
+        .get_device(device_id)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::unauthorized("device is not registered"))?;
+    if !device.trusted {
+        return Err(ApiError::forbidden("device is not trusted"));
+    }
+    if device.public_key.trim().is_empty() {
+        return Err(ApiError::unauthorized("device public key is missing"));
+    }
+    Ok(device)
+}
+
+fn verify_rest_signature(
+    device: &Device,
+    method: &str,
+    path_and_query: &str,
+    headers: &SignedRequestHeaders,
+) -> ApiResult<()> {
+    let public_key = STANDARD
+        .decode(device.public_key.trim())
+        .map_err(|_| ApiError::unauthorized("invalid device public key"))?;
+    let public_key: [u8; 32] = public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| ApiError::unauthorized("invalid device public key"))?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| ApiError::unauthorized("invalid device public key"))?;
+
+    let signature = STANDARD
+        .decode(&headers.signature)
+        .map_err(|_| ApiError::unauthorized("invalid request signature"))?;
+    let signature: [u8; 64] = signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| ApiError::unauthorized("invalid request signature"))?;
+    let signature = Signature::from_bytes(&signature);
+
+    let message = rest_signing_message(
+        method,
+        path_and_query,
+        &headers.device_id,
+        &headers.timestamp,
+        &headers.nonce,
+        &headers.body_sha256,
+    );
+    verifying_key
+        .verify(message.as_bytes(), &signature)
+        .map_err(|_| ApiError::unauthorized("invalid request signature"))
+}
+
+fn validate_timestamp(value: &str) -> ApiResult<()> {
+    let timestamp = DateTime::parse_from_rfc3339(value)
+        .map_err(|_| ApiError::unauthorized("invalid request timestamp"))?
+        .with_timezone(&Utc);
+    let now = Utc::now();
+    let skew = if timestamp > now {
+        (timestamp - now).to_std()
+    } else {
+        (now - timestamp).to_std()
+    }
+    .map_err(|_| ApiError::unauthorized("invalid request timestamp"))?;
+    if skew > MAX_REST_SIGNATURE_SKEW {
+        return Err(ApiError::unauthorized("request timestamp is stale"));
+    }
+    Ok(())
+}
+
+struct SignedRequestHeaders {
+    device_id: DeviceId,
+    timestamp: String,
+    nonce: String,
+    body_sha256: String,
+    signature: String,
+}
+
+impl SignedRequestHeaders {
+    fn from_headers(headers: &HeaderMap) -> ApiResult<Self> {
+        let signature_alg = header_value(headers, AIRPASTE_SIGNATURE_ALG_HEADER)?;
+        if signature_alg != AIRPASTE_REST_SIGNATURE_ALG {
+            return Err(ApiError::unauthorized(
+                "missing or unsupported request signature algorithm",
+            ));
+        }
+
+        Ok(Self {
+            device_id: device_id_from_headers(headers)?,
+            timestamp: header_value(headers, AIRPASTE_TIMESTAMP_HEADER)?,
+            nonce: header_value(headers, AIRPASTE_NONCE_HEADER)?,
+            body_sha256: header_value(headers, AIRPASTE_BODY_SHA256_HEADER)?,
+            signature: header_value(headers, AIRPASTE_SIGNATURE_HEADER)?,
+        })
+    }
+}
+
+fn device_id_from_headers(headers: &HeaderMap) -> ApiResult<DeviceId> {
+    Ok(DeviceId::from(
+        header_value(headers, AIRPASTE_DEVICE_ID_HEADER)
+            .map_err(|_| ApiError::unauthorized("missing Air Paste device id header"))?,
+    ))
+}
+
+fn header_value(headers: &HeaderMap, name: &'static str) -> ApiResult<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| ApiError::unauthorized(format!("missing {name} header")))
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -249,6 +488,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -259,6 +505,13 @@ impl ApiError {
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: message.into(),
         }
     }
