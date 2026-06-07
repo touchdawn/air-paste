@@ -120,18 +120,29 @@ try {
     Set-Clipboard -Value $publishText
     Start-Sleep -Seconds 2
     $latest = Get-LatestClip
-    if ($latest.kind.text.encrypted_inline_body -ne $publishText) {
-        throw "publish smoke failed"
+    # Text clips are end-to-end encrypted: the inline body is ciphertext (base64), never the
+    # plaintext. Verify a text clip landed with a non-empty encrypted body + expiry.
+    if ($null -eq $latest.kind.text) {
+        throw "publish smoke failed: latest clip was not a text clip (publish did not land)"
+    }
+    if (-not $latest.kind.text.encrypted_inline_body) {
+        throw "publish smoke failed: text clip has no encrypted body"
+    }
+    if ($latest.kind.text.encrypted_inline_body -eq $publishText) {
+        throw "publish smoke failed: text body was stored as plaintext, not encrypted"
     }
     if (!$latest.expires_at) {
         throw "publish smoke failed: text clip did not include expires_at"
     }
+    $publishClipId = $latest.clip_id
+
+    # Sensitive text must be filtered out, so no new clip is published (clip_id unchanged).
     $sensitiveText = "DATABASE_PASSWORD=airpaste-smoke-secret"
     Set-Clipboard -Value $sensitiveText
     Start-Sleep -Seconds 2
     $latestAfterSensitive = Get-LatestClip
-    if ($latestAfterSensitive.kind.text.encrypted_inline_body -eq $sensitiveText) {
-        throw "sensitive text filter smoke failed: secret-like text was published"
+    if ($latestAfterSensitive.clip_id -ne $publishClipId) {
+        throw "sensitive text filter smoke failed: a new clip was published for secret-like text"
     }
 
     Write-Host "Apply path"
