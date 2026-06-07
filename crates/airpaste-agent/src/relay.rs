@@ -11,7 +11,7 @@ use crate::{
     identity::{DeviceIdentity, PEER_FILE_SIGNATURE_ALG},
     peer::PeerFileRegistry,
 };
-use airpaste_core::{ClipId, DeviceId, FileClip, FileEntryKind, SessionId, WrappedKey};
+use airpaste_core::{ClipId, DeviceId, FileClip, SessionId, WrappedKey};
 use airpaste_crypto::{open_bytes, seal_bytes, EncryptionIdentity, Recipient};
 use airpaste_protocol::CreateRelaySessionRequest;
 use anyhow::{bail, Context};
@@ -19,7 +19,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{path::Path, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::Path, path::PathBuf, time::Duration};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     tungstenite::Message, MaybeTlsStream, WebSocketStream,
@@ -132,18 +132,33 @@ pub async fn serve_relay_session(
         .await
         {
             Ok((header, ciphertext)) => {
-                writer
-                    .send(Message::Text(serde_json::to_string(&header)?))
-                    .await?;
-                for chunk in ciphertext.chunks(RELAY_CHUNK_BYTES) {
-                    writer.send(Message::Binary(chunk.to_vec())).await?;
+                let send_result: anyhow::Result<()> = async {
+                    writer
+                        .send(Message::Text(serde_json::to_string(&header)?))
+                        .await?;
+                    for chunk in ciphertext.chunks(RELAY_CHUNK_BYTES) {
+                        writer.send(Message::Binary(chunk.to_vec())).await?;
+                    }
+                    writer
+                        .send(Message::Text(serde_json::to_string(&RelayControl::FileEnd {
+                            index,
+                        })?))
+                        .await?;
+                    Ok(())
                 }
-                writer
-                    .send(Message::Text(serde_json::to_string(&RelayControl::FileEnd {
-                        index,
-                    })?))
-                    .await?;
-                tracing::info!(%session_id, index, "served relay file");
+                .await;
+                match send_result {
+                    Ok(()) => {
+                        // Bytes delivered: consume the one-time grant for this index.
+                        registry.commit_served(&token, index);
+                        tracing::info!(%session_id, index, "served relay file");
+                    }
+                    Err(error) => {
+                        // Delivery failed mid-stream: release so a retry can re-claim.
+                        registry.release(&token, index);
+                        return Err(error);
+                    }
+                }
             }
             Err(reason) => {
                 tracing::warn!(%session_id, index, %reason, "relay file request rejected");
@@ -160,6 +175,9 @@ pub async fn serve_relay_session(
     Ok(())
 }
 
+/// Claim and prepare one file for relay delivery. On success the index is *reserved* in the
+/// registry (held until the caller commits or releases it after the bytes are sent). A
+/// failure after a successful claim releases the reservation so the recipient can retry.
 #[allow(clippy::too_many_arguments)]
 async fn serve_one_file(
     registry: &PeerFileRegistry,
@@ -186,7 +204,22 @@ async fn serve_one_file(
         Err(error) => return Err(format!("registry error: {error}")),
     };
 
-    let bytes = tokio::fs::read(&path)
+    // Index is reserved now; release it if reading or sealing fails.
+    match prepare_relay_file(recipient, &path, index).await {
+        Ok(prepared) => Ok(prepared),
+        Err(reason) => {
+            registry.release(token, index);
+            Err(reason)
+        }
+    }
+}
+
+async fn prepare_relay_file(
+    recipient: &Recipient,
+    path: &Path,
+    index: usize,
+) -> Result<(RelayControl, Vec<u8>), String> {
+    let bytes = tokio::fs::read(path)
         .await
         .map_err(|error| format!("failed to read file: {error}"))?;
     let size = bytes.len() as u64;
@@ -202,8 +235,11 @@ async fn serve_one_file(
     Ok((header, sealed.body_ciphertext))
 }
 
-/// Recipient side: create a relay session and pull each file through the server-mediated
-/// pipe, decrypting and verifying it before writing to the cache.
+/// Recipient side: create a relay session and pull each missing file through the
+/// server-mediated pipe, decrypting and verifying it before writing to the cache. Indexes
+/// already present in `downloaded` (e.g. fetched directly before a fallback) are skipped, so
+/// a partial direct transfer is completed rather than re-pulled from scratch.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_via_relay(
     client: &ServerClient,
     identity: &DeviceIdentity,
@@ -213,7 +249,13 @@ pub async fn download_via_relay(
     source_device_id: &DeviceId,
     file_clip: &FileClip,
     cache_dir: &Path,
-) -> anyhow::Result<Vec<PathBuf>> {
+    downloaded: &mut BTreeMap<usize, PathBuf>,
+) -> anyhow::Result<()> {
+    let missing = crate::missing_file_indexes(file_clip, downloaded);
+    if missing.is_empty() {
+        return Ok(());
+    }
+
     let response = client
         .create_relay_session(CreateRelaySessionRequest {
             clip_id: clip_id.clone(),
@@ -225,7 +267,7 @@ pub async fn download_via_relay(
         .await
         .context("failed to create relay session")?;
     let session_id = response.relay.session_id;
-    tracing::info!(%session_id, "relay recipient created session");
+    tracing::info!(%session_id, missing = missing.len(), "relay recipient created session");
 
     let request = client.relay_ws_request(session_id.as_str()).await?;
     let ws = connect_relay(request)
@@ -235,16 +277,9 @@ pub async fn download_via_relay(
 
     let clip_cache_dir = cache_dir.join(file_clip.transfer_token.as_str());
     tokio::fs::create_dir_all(&clip_cache_dir).await?;
-    let mut downloaded = Vec::new();
 
-    for (index, entry) in file_clip.files.iter().enumerate() {
-        if !matches!(entry.kind, FileEntryKind::File) {
-            tracing::warn!(
-                relative_path = %entry.relative_path,
-                "skipping non-file entry in relay transfer"
-            );
-            continue;
-        }
+    for index in missing {
+        let entry = &file_clip.files[index];
 
         let signature = identity.sign_peer_file_request(
             clip_id,
@@ -297,10 +332,10 @@ pub async fn download_via_relay(
         let destination = crate::safe_cache_path(&clip_cache_dir, &entry.display_name);
         tokio::fs::write(&destination, &plaintext).await?;
         tracing::info!(path = %destination.display(), "downloaded remote file via relay");
-        downloaded.push(destination);
+        downloaded.insert(index, destination);
     }
 
-    Ok(downloaded)
+    Ok(())
 }
 
 async fn recv_file_header(

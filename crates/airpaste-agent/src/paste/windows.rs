@@ -9,13 +9,27 @@ impl PasteSimulator {
         Self
     }
 
+    pub fn accessibility_trusted(&self) -> bool {
+        true
+    }
+
     pub fn paste(&self) -> anyhow::Result<()> {
+        self.send_ctrl_chord(VK_V)
+    }
+
+    pub fn copy(&self) -> anyhow::Result<()> {
+        self.send_ctrl_chord(VK_C)
+    }
+
+    /// Release the modifiers the user is holding from the triggering hotkey, then send a
+    /// clean Ctrl+<key> chord so the synthesized keystroke is not mixed with Ctrl+Shift.
+    fn send_ctrl_chord(&self, vk: u16) -> anyhow::Result<()> {
         let inputs = [
             key_input(VK_SHIFT, KEYEVENTF_KEYUP),
             key_input(VK_CONTROL, KEYEVENTF_KEYUP),
             key_input(VK_CONTROL, 0),
-            key_input(VK_V, 0),
-            key_input(VK_V, KEYEVENTF_KEYUP),
+            key_input(vk, 0),
+            key_input(vk, KEYEVENTF_KEYUP),
             key_input(VK_CONTROL, KEYEVENTF_KEYUP),
         ];
         let sent = unsafe {
@@ -33,6 +47,7 @@ impl PasteSimulator {
 }
 
 const VK_V: u16 = 0x56;
+const VK_C: u16 = 0x43;
 
 fn key_input(vk: u16, flags: u32) -> INPUT {
     INPUT {

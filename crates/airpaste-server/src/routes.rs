@@ -256,7 +256,8 @@ async fn relay_ws_upgrade(
         Err(error) => return ApiError::from(error).into_response(),
     };
 
-    if session.expires_at <= now() {
+    let now_ts = now();
+    if session.expires_at <= now_ts {
         return (StatusCode::GONE, "relay session expired").into_response();
     }
 
@@ -274,7 +275,9 @@ async fn relay_ws_upgrade(
 
     let hub = state.relay_hub.clone();
     let max_bytes = session.max_bytes;
-    ws.on_upgrade(move |socket| relay_ws_handler(socket, hub, session_id, role, max_bytes))
+    // Tear the relay down at the session deadline even if it stays connected.
+    let ttl = Duration::from_secs((session.expires_at - now_ts).num_seconds().max(0) as u64);
+    ws.on_upgrade(move |socket| relay_ws_handler(socket, hub, session_id, role, max_bytes, ttl))
 }
 
 async fn require_auth(

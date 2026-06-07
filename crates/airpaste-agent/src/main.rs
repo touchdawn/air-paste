@@ -12,9 +12,9 @@ mod state_file;
 use crate::{
     client::ServerClient,
     clipboard::Clipboard,
-    config::Args,
+    config::{Args, ClipboardMode},
     discovery::PeerDirectory,
-    hotkey::{spawn_remote_paste_listener, REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY},
+    hotkey::{spawn_hotkey_listener, HotkeyAction, REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY},
     identity::DeviceIdentity,
     paste::PasteSimulator,
     peer::{run_peer_server, PeerFileRegistry},
@@ -32,7 +32,7 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -50,6 +50,18 @@ const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Base and max delay between control-websocket reconnect attempts (exponential backoff).
 const WS_RECONNECT_BASE: Duration = Duration::from_secs(2);
 const WS_RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+/// Isolated-mode timing for the synthetic paste dance: settle the clipboard after writing
+/// our text, paste, then let the target app consume it before restoring the user's clipboard.
+const CLIPBOARD_SETTLE: Duration = Duration::from_millis(80);
+const PASTE_CONSUME: Duration = Duration::from_millis(150);
+/// Wait for the triggering hotkey's Ctrl+Shift to be released before synthesizing a chord, so
+/// the held modifiers do not combine with it (e.g. turning the synthetic Cmd+C into Ctrl+Cmd+C,
+/// which is not "copy"). The paste path already waits via CLIPBOARD_SETTLE after set_text.
+const HOTKEY_MODIFIER_RELEASE: Duration = Duration::from_millis(120);
+/// Polling for the result of a synthetic copy (the OS populates the clipboard async).
+const COPY_POLL_INTERVAL: Duration = Duration::from_millis(40);
+const COPY_POLL_ATTEMPTS: usize = 15;
 
 #[derive(Clone)]
 struct FileTransferPolicy {
@@ -71,6 +83,20 @@ struct PendingFileClip {
 struct TextPublishPolicy {
     filter_sensitive_text: bool,
     max_text_clip_bytes: usize,
+}
+
+/// Clipboard integration mode plus the isolated-mode inbox (latest remote text held in-app
+/// instead of being written to the system clipboard).
+#[derive(Clone)]
+struct ClipboardCtx {
+    mode: ClipboardMode,
+    inbox: Arc<Mutex<Option<String>>>,
+}
+
+impl ClipboardCtx {
+    fn is_isolated(&self) -> bool {
+        self.mode == ClipboardMode::Isolated
+    }
 }
 
 #[tokio::main]
@@ -206,6 +232,19 @@ async fn main() -> anyhow::Result<()> {
 
     let clipboard = Arc::new(Clipboard::new());
     let paste = Arc::new(PasteSimulator::new());
+    let clip_ctx = ClipboardCtx {
+        mode: args.clipboard_mode,
+        inbox: Arc::new(Mutex::new(None::<String>)),
+    };
+    if clip_ctx.is_isolated() {
+        tracing::info!("clipboard isolated mode: Ctrl+Shift+C pushes the selection, Ctrl+Shift+V pastes from AirPaste");
+        if !paste.accessibility_trusted() {
+            tracing::warn!(
+                "isolated mode needs Accessibility permission to synthesize copy/paste; \
+                 grant it in System Settings -> Privacy & Security -> Accessibility, then restart"
+            );
+        }
+    }
     let last_local_write = Arc::new(Mutex::new(None::<String>));
     let last_local_file_write = Arc::new(Mutex::new(None::<String>));
     let pending_file_clip = Arc::new(Mutex::new(None::<PendingFileClip>));
@@ -240,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
             file_policy.clone(),
             text_clip_ttl_secs,
             text_publish_policy,
+            clip_ctx.clone(),
             Duration::from_millis(args.poll_ms),
         ))
     } else {
@@ -264,6 +304,8 @@ async fn main() -> anyhow::Result<()> {
         file_policy,
         auto_apply_files,
         auto_paste_files,
+        clip_ctx,
+        text_clip_ttl_secs,
         cache_dir,
     ));
 
@@ -331,6 +373,7 @@ async fn ensure_device(
     Ok(device.device_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn poll_clipboard(
     client: ServerClient,
     clipboard: Arc<Clipboard>,
@@ -342,6 +385,7 @@ async fn poll_clipboard(
     file_policy: FileTransferPolicy,
     text_clip_ttl_secs: u64,
     text_publish_policy: TextPublishPolicy,
+    clip_ctx: ClipboardCtx,
     interval: Duration,
 ) -> anyhow::Result<()> {
     let mut last_seen = clipboard.get_text().unwrap_or_default();
@@ -386,6 +430,12 @@ async fn poll_clipboard(
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "failed to read file clipboard"),
+        }
+
+        // In isolated mode, text is only published on demand via Ctrl+Shift+C, never by
+        // watching the system clipboard.
+        if clip_ctx.is_isolated() {
+            continue;
         }
 
         let text = match clipboard.get_text() {
@@ -900,6 +950,56 @@ mod tests {
         );
     }
 
+    fn file_entry(name: &str, kind: FileEntryKind) -> FileEntry {
+        FileEntry {
+            relative_path: name.to_string(),
+            display_name: name.to_string(),
+            size: 1,
+            modified_at: None,
+            sha256: None,
+            kind,
+        }
+    }
+
+    fn file_clip_with(kinds: &[FileEntryKind]) -> FileClip {
+        FileClip {
+            files: kinds
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| file_entry(&format!("f{i}"), kind.clone()))
+                .collect(),
+            total_size: kinds.len() as u64,
+            transfer_token: TransferToken::from("tt-test".to_string()),
+            source_peer_url: None,
+            transfer_expires_at: None,
+        }
+    }
+
+    #[test]
+    fn missing_file_indexes_skips_directories_and_done() {
+        let clip = file_clip_with(&[
+            FileEntryKind::File,
+            FileEntryKind::Directory,
+            FileEntryKind::File,
+            FileEntryKind::File,
+        ]);
+
+        // Nothing downloaded yet: every regular file (0, 2, 3) is missing; the directory (1) is not.
+        let empty = BTreeMap::new();
+        assert_eq!(missing_file_indexes(&clip, &empty), vec![0, 2, 3]);
+
+        // Index 0 already delivered directly: only 2 and 3 remain for the relay fallback.
+        let mut partial = BTreeMap::new();
+        partial.insert(0usize, PathBuf::from("/cache/f0"));
+        assert_eq!(missing_file_indexes(&clip, &partial), vec![2, 3]);
+
+        // All regular files done: nothing left to pull, so the relay creates no session.
+        let mut done = partial;
+        done.insert(2usize, PathBuf::from("/cache/f2"));
+        done.insert(3usize, PathBuf::from("/cache/f3"));
+        assert!(missing_file_indexes(&clip, &done).is_empty());
+    }
+
     #[test]
     fn sensitive_filter_can_be_disabled_without_disabling_size_guard() {
         let policy = TextPublishPolicy {
@@ -966,11 +1066,13 @@ async fn run_ws(
     file_policy: FileTransferPolicy,
     auto_apply_files: bool,
     auto_paste_files: bool,
+    clip_ctx: ClipboardCtx,
+    text_clip_ttl_secs: u64,
     cache_dir: PathBuf,
 ) -> anyhow::Result<()> {
-    let (hotkey_tx, mut hotkey_rx) = mpsc::unbounded_channel();
+    let (hotkey_tx, mut hotkey_rx) = mpsc::unbounded_channel::<HotkeyAction>();
     if remote_paste_hotkey && apply_remote {
-        match spawn_remote_paste_listener(hotkey_tx) {
+        match spawn_hotkey_listener(hotkey_tx, clip_ctx.is_isolated()) {
             Ok(()) => {
                 let hotkey_client = client.clone();
                 let hotkey_clipboard = clipboard.clone();
@@ -983,33 +1085,49 @@ async fn run_ws(
                 let hotkey_file_policy = file_policy.clone();
                 let hotkey_peer_directory = peer_directory.clone();
                 let hotkey_cache_dir = cache_dir.clone();
+                let hotkey_clip_ctx = clip_ctx.clone();
                 let paste_after_hotkey = REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY;
                 tokio::spawn(async move {
-                    while hotkey_rx.recv().await.is_some() {
-                        if let Err(error) = apply_pending_file_clip(
-                            &hotkey_client,
-                            &hotkey_clipboard,
-                            &hotkey_device_id,
-                            &hotkey_last_local_file_write,
-                            &hotkey_pending_file_clip,
-                            &hotkey_paste,
-                            &hotkey_identity,
-                            &hotkey_encryption,
-                            &hotkey_file_policy,
-                            &hotkey_peer_directory,
-                            prefer_relay,
-                            paste_after_hotkey,
-                            &hotkey_cache_dir,
-                        )
-                        .await
-                        {
-                            tracing::warn!(%error, "remote paste hotkey failed");
+                    while let Some(action) = hotkey_rx.recv().await {
+                        let result = match action {
+                            HotkeyAction::CopyToAirPaste => copy_selection_to_airpaste(
+                                &hotkey_client,
+                                &hotkey_device_id,
+                                &hotkey_clipboard,
+                                &hotkey_paste,
+                                text_clip_ttl_secs,
+                            )
+                            .await
+                            .context("Ctrl+Shift+C failed"),
+                            HotkeyAction::PasteRemote => {
+                                paste_remote_via_hotkey(
+                                    &hotkey_clip_ctx,
+                                    &hotkey_clipboard,
+                                    &hotkey_paste,
+                                    &hotkey_client,
+                                    &hotkey_device_id,
+                                    &hotkey_last_local_file_write,
+                                    &hotkey_pending_file_clip,
+                                    &hotkey_identity,
+                                    &hotkey_encryption,
+                                    &hotkey_file_policy,
+                                    &hotkey_peer_directory,
+                                    prefer_relay,
+                                    paste_after_hotkey,
+                                    &hotkey_cache_dir,
+                                )
+                                .await
+                                .context("Ctrl+Shift+V failed")
+                            }
+                        };
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "hotkey action failed");
                         }
                     }
-                    tracing::warn!("remote paste hotkey listener channel closed");
+                    tracing::warn!("hotkey listener channel closed");
                 });
             }
-            Err(error) => tracing::warn!(%error, "remote paste hotkey disabled"),
+            Err(error) => tracing::warn!(%error, "hotkeys disabled"),
         }
     }
 
@@ -1032,6 +1150,7 @@ async fn run_ws(
             &file_policy,
             auto_apply_files,
             auto_paste_files,
+            &clip_ctx,
             &cache_dir,
         )
         .await;
@@ -1069,6 +1188,7 @@ async fn run_ws_once(
     file_policy: &FileTransferPolicy,
     auto_apply_files: bool,
     auto_paste_files: bool,
+    clip_ctx: &ClipboardCtx,
     cache_dir: &Path,
 ) -> anyhow::Result<()> {
     let request = client.ws_request().await?;
@@ -1108,6 +1228,7 @@ async fn run_ws_once(
             file_policy,
             auto_apply_files,
             auto_paste_files,
+            clip_ctx,
             cache_dir,
         )
         .await?;
@@ -1134,6 +1255,7 @@ async fn handle_server_event(
     file_policy: &FileTransferPolicy,
     auto_apply_files: bool,
     auto_paste_files: bool,
+    clip_ctx: &ClipboardCtx,
     cache_dir: &Path,
 ) -> anyhow::Result<()> {
     match event {
@@ -1148,9 +1270,16 @@ async fn handle_server_event(
             };
             match decrypt_remote_text(&text_clip, &clip.encryption, device_id, encryption) {
                 Ok(Some(text)) => {
-                    clipboard.set_text(&text)?;
-                    *last_local_write.lock().await = Some(text);
-                    tracing::info!("applied remote text clip");
+                    if clip_ctx.is_isolated() {
+                        // Isolated mode: keep the text in the in-app inbox; the system
+                        // clipboard is left untouched until the user presses Ctrl+Shift+V.
+                        *clip_ctx.inbox.lock().await = Some(text);
+                        tracing::info!("stored remote text in isolated inbox");
+                    } else {
+                        clipboard.set_text(&text)?;
+                        *last_local_write.lock().await = Some(text);
+                        tracing::info!("applied remote text clip");
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(%error, "failed to apply remote text clip"),
@@ -1231,6 +1360,113 @@ async fn handle_server_event(
         ServerEvent::Error { message } => tracing::warn!(%message, "server event error"),
     }
     Ok(())
+}
+
+/// Ctrl+Shift+V dispatch. In isolated mode, paste the inbox text (zero-touch) when present;
+/// otherwise fall back to the file-paste flow. In system mode, run the file-paste flow.
+#[allow(clippy::too_many_arguments)]
+async fn paste_remote_via_hotkey(
+    clip_ctx: &ClipboardCtx,
+    clipboard: &Clipboard,
+    paste: &PasteSimulator,
+    client: &ServerClient,
+    device_id: &DeviceId,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending_file_clip: &Mutex<Option<PendingFileClip>>,
+    identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
+    file_policy: &FileTransferPolicy,
+    peer_directory: &PeerDirectory,
+    prefer_relay: bool,
+    paste_after_apply: bool,
+    cache_dir: &Path,
+) -> anyhow::Result<()> {
+    if clip_ctx.is_isolated() && paste_inbox_text(&clip_ctx.inbox, clipboard, paste).await? {
+        return Ok(());
+    }
+    apply_pending_file_clip(
+        client,
+        clipboard,
+        device_id,
+        last_local_file_write,
+        pending_file_clip,
+        paste,
+        identity,
+        encryption,
+        file_policy,
+        peer_directory,
+        prefer_relay,
+        paste_after_apply,
+        cache_dir,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Paste the latest inbox text into the focused app without leaving it on the system
+/// clipboard: save the current clipboard, set ours, synthesize paste, then restore. Returns
+/// `false` (no-op) when the inbox is empty so the caller can fall back to files.
+async fn paste_inbox_text(
+    inbox: &Mutex<Option<String>>,
+    clipboard: &Clipboard,
+    paste: &PasteSimulator,
+) -> anyhow::Result<bool> {
+    let Some(text) = inbox.lock().await.clone() else {
+        return Ok(false);
+    };
+    let saved = clipboard.get_text().ok().flatten();
+    clipboard.set_text(&text)?;
+    tokio::time::sleep(CLIPBOARD_SETTLE).await;
+    paste.paste()?;
+    tokio::time::sleep(PASTE_CONSUME).await;
+    if let Some(previous) = saved {
+        let _ = clipboard.set_text(&previous);
+    }
+    tracing::info!("pasted AirPaste inbox text");
+    Ok(true)
+}
+
+/// Ctrl+Shift+C: synthesize a copy of the current selection, read it off the clipboard,
+/// restore the user's clipboard, and publish it to the AirPaste channel.
+async fn copy_selection_to_airpaste(
+    client: &ServerClient,
+    device_id: &DeviceId,
+    clipboard: &Clipboard,
+    paste: &PasteSimulator,
+    text_clip_ttl_secs: u64,
+) -> anyhow::Result<()> {
+    let saved = clipboard.get_text().ok().flatten();
+    // Let the triggering Ctrl+Shift release so the synthetic Cmd+C is a clean copy.
+    tokio::time::sleep(HOTKEY_MODIFIER_RELEASE).await;
+    paste.copy()?;
+    let selection = read_after_copy(clipboard, saved.as_deref()).await;
+    if let Some(previous) = &saved {
+        let _ = clipboard.set_text(previous);
+    }
+    let Some(text) = selection else {
+        tracing::warn!("Ctrl+Shift+C captured no text selection");
+        return Ok(());
+    };
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let response = publish_text_clip(client, device_id, text, text_clip_ttl_secs).await?;
+    tracing::info!(clip_id = %response.clip_id, "pushed selection to AirPaste");
+    Ok(())
+}
+
+/// Poll the clipboard briefly for the result of a synthetic copy, returning the captured
+/// text once it differs from `previous` (or whatever is present after the timeout).
+async fn read_after_copy(clipboard: &Clipboard, previous: Option<&str>) -> Option<String> {
+    for _ in 0..COPY_POLL_ATTEMPTS {
+        tokio::time::sleep(COPY_POLL_INTERVAL).await;
+        if let Ok(Some(text)) = clipboard.get_text() {
+            if !text.is_empty() && Some(text.as_str()) != previous {
+                return Some(text);
+            }
+        }
+    }
+    clipboard.get_text().ok().flatten()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1340,47 +1576,58 @@ async fn apply_file_clip(
 ) -> anyhow::Result<Vec<PathBuf>> {
     validate_file_clip(&pending.file_clip, file_policy)?;
 
-    let downloaded_files = if prefer_relay {
+    // Indexes are filled in by whichever path delivers them. On a direct->relay fallback the
+    // map already holds the files fetched directly, so the relay only pulls the rest instead
+    // of re-pulling the whole transfer (which would hit `already served` for done indexes).
+    let mut downloaded: BTreeMap<usize, PathBuf> = BTreeMap::new();
+    if prefer_relay {
         tracing::info!(
             source_device_id = %pending.source_device_id,
             "pulling remote files through the encrypted relay"
         );
-        download_via_relay_for(client, identity, encryption, requester_device_id, pending, cache_dir)
-            .await?
-    } else {
-        match download_remote_files(
+        download_via_relay_for(
             client,
-            cache_dir,
-            requester_device_id,
             identity,
-            peer_directory,
+            encryption,
+            requester_device_id,
             pending,
+            cache_dir,
+            &mut downloaded,
+        )
+        .await?;
+    } else if let Err(direct_error) = download_remote_files(
+        client,
+        cache_dir,
+        requester_device_id,
+        identity,
+        peer_directory,
+        pending,
+        &mut downloaded,
+    )
+    .await
+    {
+        // Direct/LAN transfer failed or stalled partway. Fall back to the server-mediated
+        // encrypted relay for whatever was not delivered directly.
+        tracing::warn!(
+            %direct_error,
+            source_device_id = %pending.source_device_id,
+            delivered_directly = downloaded.len(),
+            "direct file download failed; falling back to encrypted relay"
+        );
+        download_via_relay_for(
+            client,
+            identity,
+            encryption,
+            requester_device_id,
+            pending,
+            cache_dir,
+            &mut downloaded,
         )
         .await
-        {
-            Ok(files) => files,
-            Err(direct_error) => {
-                // Direct/LAN transfer failed (commonly: the source peer port is not
-                // reachable, so nothing was served and the one-time grants are intact).
-                // Fall back to the server-mediated encrypted relay.
-                tracing::warn!(
-                    %direct_error,
-                    source_device_id = %pending.source_device_id,
-                    "direct file download failed; falling back to encrypted relay"
-                );
-                download_via_relay_for(
-                    client,
-                    identity,
-                    encryption,
-                    requester_device_id,
-                    pending,
-                    cache_dir,
-                )
-                .await
-                .context("relay fallback after direct download failure also failed")?
-            }
-        }
-    };
+        .context("relay fallback after direct download failure also failed")?;
+    }
+
+    let downloaded_files: Vec<PathBuf> = downloaded.into_values().collect();
     if downloaded_files.is_empty() {
         bail!("remote file clip did not contain downloadable files");
     }
@@ -1433,7 +1680,8 @@ fn validate_file_clip(
     Ok(())
 }
 
-/// Pull a pending file clip's files through the server-mediated encrypted relay.
+/// Pull a pending file clip's still-missing files through the server-mediated encrypted relay.
+#[allow(clippy::too_many_arguments)]
 async fn download_via_relay_for(
     client: &ServerClient,
     identity: &DeviceIdentity,
@@ -1441,7 +1689,8 @@ async fn download_via_relay_for(
     requester_device_id: &DeviceId,
     pending: &PendingFileClip,
     cache_dir: &Path,
-) -> anyhow::Result<Vec<PathBuf>> {
+    downloaded: &mut BTreeMap<usize, PathBuf>,
+) -> anyhow::Result<()> {
     relay::download_via_relay(
         client,
         identity,
@@ -1451,8 +1700,25 @@ async fn download_via_relay_for(
         &pending.source_device_id,
         &pending.file_clip,
         cache_dir,
+        downloaded,
     )
     .await
+}
+
+/// File indexes in a manifest that are regular files and not yet present in `downloaded`.
+fn missing_file_indexes(
+    file_clip: &FileClip,
+    downloaded: &BTreeMap<usize, PathBuf>,
+) -> Vec<usize> {
+    file_clip
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(index, entry)| {
+            matches!(entry.kind, FileEntryKind::File) && !downloaded.contains_key(index)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Resolve where to download a peer's files from: prefer the mDNS-discovered LAN address of
@@ -1478,6 +1744,10 @@ async fn resolve_peer_base_url(
     }
 }
 
+/// Download each still-missing regular file directly from the source peer, inserting
+/// successes into `downloaded`. Returns on the first failure with the partial progress
+/// preserved in `downloaded`, so the caller can fall back to the relay for the rest.
+#[allow(clippy::too_many_arguments)]
 async fn download_remote_files(
     client: &ServerClient,
     cache_dir: &Path,
@@ -1485,23 +1755,16 @@ async fn download_remote_files(
     identity: &DeviceIdentity,
     peer_directory: &PeerDirectory,
     pending: &PendingFileClip,
-) -> anyhow::Result<Vec<PathBuf>> {
+    downloaded: &mut BTreeMap<usize, PathBuf>,
+) -> anyhow::Result<()> {
     let file_clip = &pending.file_clip;
     let peer_base_url = resolve_peer_base_url(peer_directory, pending).await?;
 
     let clip_cache_dir = cache_dir.join(file_clip.transfer_token.as_str());
     tokio::fs::create_dir_all(&clip_cache_dir).await?;
-    let mut downloaded_files = Vec::new();
 
-    for (index, entry) in file_clip.files.iter().enumerate() {
-        if !matches!(entry.kind, FileEntryKind::File) {
-            tracing::warn!(
-                relative_path = %entry.relative_path,
-                "skipping non-file entry in MVP transfer"
-            );
-            continue;
-        }
-
+    for index in missing_file_indexes(file_clip, downloaded) {
+        let entry = &file_clip.files[index];
         let url = format!(
             "{}/v1/files/{}/{}",
             peer_base_url.trim_end_matches('/'),
@@ -1520,10 +1783,10 @@ async fn download_remote_files(
         let destination = safe_cache_path(&clip_cache_dir, &entry.display_name);
         download_peer_file_to_cache(response, entry, &destination).await?;
         tracing::info!(path = %destination.display(), "downloaded remote file");
-        downloaded_files.push(destination);
+        downloaded.insert(index, destination);
     }
 
-    Ok(downloaded_files)
+    Ok(())
 }
 
 async fn hash_file_sha256(path: &Path) -> anyhow::Result<String> {

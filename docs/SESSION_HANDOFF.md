@@ -27,10 +27,31 @@ order:
 6. **Encrypted relay data path** (`GET /v1/relay/{session_id}/ws`) with automatic
    direct->relay fallback, plus network-loss hardening (reconnect backoff, connect/receive
    timeouts) and resilient clipboard polling.
+7. **Relay/fallback hardening** (this session, working tree — not yet committed):
+   - Source file grants are now **commit-on-complete**: an index is only consumed against
+     the one-time grant after its bytes finish streaming; a failed/aborted transfer
+     **releases** it for retry. The direct HTTP path uses a streaming drop-guard
+     (`GrantStream`); the relay path commits/releases explicitly.
+   - The direct->relay fallback is now **partial**: already-downloaded indexes are threaded
+     through, so the relay retry pulls only the missing files instead of re-pulling the whole
+     transfer (which previously hit `410 already served`).
+   - The server relay now uses **bounded, backpressured** per-direction queues (split
+     read/write tasks, no deadlock, no frame drops) and **enforces the session TTL
+     mid-connection**, not just at connect.
+8. **Isolated clipboard mode** (this session, working tree — not yet committed): a new
+   `--clipboard-mode isolated` keeps the AirPaste text channel separate from the system
+   clipboard. Remote text lands in an in-app inbox (the system clipboard is never
+   auto-overwritten); `Ctrl+Shift+C` captures the current selection into AirPaste and
+   `Ctrl+Shift+V` pastes the inbox text into the focused app, both via synthetic copy/paste
+   with a save/restore dance so the system clipboard is left untouched. This adds the first
+   **macOS synthetic copy/paste** (CoreGraphics `CGEvent`, requires Accessibility permission;
+   `crates/airpaste-agent/src/paste/macos.rs`). Text-only for now; files keep the existing
+   flow. See "Isolated Clipboard Mode" below.
 
 Recent commits (newest first): `84d33af` relay fallback + resilient polling, `a681f98`
 relay data path + hardening, `830e954` mDNS, `e64d9a0` LAN validation notes, `e1ed3d1`
-text E2EE, `f894c26` cross-compile helper, `925d05d` provider-token filter.
+text E2EE, `f894c26` cross-compile helper, `925d05d` provider-token filter. (The item-7
+relay/fallback hardening above is uncommitted working-tree changes.)
 
 The workspace currently contains:
 
@@ -94,6 +115,10 @@ cargo check
 cargo test
 scripts/smoke-agent-macos.sh
 scripts/smoke-agent-macos.sh --auth-token airpaste-smoke-secret
+scripts/smoke-relay-macos.sh
+scripts/smoke-relay-macos.sh --auth-token airpaste-relay-secret
+scripts/smoke-isolated-macos.sh
+scripts/smoke-isolated-macos.sh --auth-token airpaste-iso-secret
 scripts/smoke-hotkey-macos.sh
 ```
 
@@ -167,7 +192,8 @@ The agent:
 - Downloads pending files on `Ctrl+Shift+V`, writes downloaded cache paths to Windows file clipboard, then sends normal paste.
 - On macOS, downloads pending files on `Ctrl+Shift+V` and writes downloaded cache file URLs to the pasteboard. Synthetic `Cmd+V` paste is still intentionally out of scope.
 - Supports `--apply-latest-files-once` to fetch the latest remote file clip, download its files, write them to the local clipboard/pasteboard, print downloaded paths as JSON, and exit.
-- Pulls remote files through the server-mediated encrypted relay, either automatically when a direct/LAN download fails or always when started with `--prefer-relay`. The recipient creates a relay session; the server pushes `TransferRelayReady` to both devices; both connect to `GET /v1/relay/{session_id}/ws`; the source serves files claimed from its `PeerFileRegistry` (same signed peer-file authorization as the direct path), sealing each file for the recipient with `airpaste-crypto::seal_bytes`; the server only forwards opaque frames. Direct/LAN transfer is still tried first by default.
+- Pulls remote files through the server-mediated encrypted relay, either automatically when a direct/LAN download fails or always when started with `--prefer-relay true`. The recipient creates a relay session; the server pushes `TransferRelayReady` to both devices; both connect to `GET /v1/relay/{session_id}/ws`; the source serves files claimed from its `PeerFileRegistry` (same signed peer-file authorization as the direct path), sealing each file for the recipient with `airpaste-crypto::seal_bytes`; the server only forwards opaque frames. Direct/LAN transfer is still tried first by default.
+- Fallback is incremental: files already downloaded over the direct path are not re-pulled over the relay (the relay only requests still-missing indexes), and source grants are committed only after a file finishes streaming, so a transfer that fails partway can be completed over the relay instead of failing with `410 already served`.
 - `poll_clipboard` logs and skips transient local clipboard read failures instead of exiting, so a momentary OS clipboard error does not kill the agent.
 - Reconnects the control websocket with exponential backoff (2s up to 30s) and a 10s connect timeout, so a network drop or change does not busy-reconnect or hang. Relay connects also time out (10s); relay receives time out (recipient 30s, source idle 60s).
 - Uses macOS defaults `~/Library/Application Support/AirPaste/agent.json` for state and `~/Library/Caches/AirPaste` for cache when paths are not explicitly provided.
@@ -197,7 +223,72 @@ Useful agent flags:
 - `--remote-paste-hotkey=false`
 - `--publish-clipboard=false`
 - `--apply-remote=false`
-- `--prefer-relay` (pull files through the encrypted relay instead of direct/LAN)
+- `--prefer-relay true` (pull files through the encrypted relay instead of direct/LAN; takes an explicit `true`/`false` value)
+- `--clipboard-mode system|isolated` (default `system`; `isolated` enables the in-app inbox + Ctrl+Shift+C / Ctrl+Shift+V text channel)
+
+## Isolated Clipboard Mode
+
+`--clipboard-mode isolated` decouples the AirPaste text channel from the system clipboard
+(text only for now; files keep the existing flow). Behaviour vs the default `system` mode:
+
+- Inbound: a remote text clip is decrypted into an in-memory **inbox** (latest one) instead
+  of being written to the system clipboard. Log line: `stored remote text in isolated inbox`.
+  The system clipboard is never auto-overwritten — this also avoids the RDP `rdpclip`
+  clobbering loop.
+- Outbound: clipboard polling no longer auto-publishes text. Press **`Ctrl+Shift+C`** to push
+  the current selection: the agent synthesizes a copy, reads the selection off the clipboard,
+  restores the user's previous clipboard, and publishes the captured text.
+- Paste: press **`Ctrl+Shift+V`** to paste the inbox text into the focused app: the agent
+  saves the current clipboard, sets it to the inbox text, synthesizes paste, then restores
+  the saved clipboard. If the inbox is empty it falls back to the existing file-paste flow.
+
+Implementation:
+
+- `crates/airpaste-agent/src/config.rs` — `ClipboardMode` enum + `--clipboard-mode`.
+- `crates/airpaste-agent/src/main.rs` — `ClipboardCtx` (mode + inbox), inbound routing,
+  outbound gating, and the `copy_selection_to_airpaste` / `paste_inbox_text` /
+  `read_after_copy` orchestration with a save/restore dance (timing consts `CLIPBOARD_SETTLE`,
+  `PASTE_CONSUME`, `COPY_POLL_*`).
+- `crates/airpaste-agent/src/paste/macos.rs` — **new** macOS synthetic copy/paste via
+  CoreGraphics `CGEvent` (Command+C / Command+V), plus `accessibility_trusted`
+  (`AXIsProcessTrusted`). Windows reuses `SendInput` (now `copy()` too).
+- `crates/airpaste-agent/src/hotkey/*` — second global hotkey (`Ctrl+Shift+C`), registered
+  only in isolated mode; the channel now carries a `HotkeyAction` (PasteRemote / CopyToAirPaste).
+
+macOS requirement and caveats:
+
+- Synthetic copy/paste needs **Accessibility permission** (System Settings -> Privacy &
+  Security -> Accessibility). The agent logs a warning at startup in isolated mode if the
+  process is not trusted. Without it, `Ctrl+Shift+C/V` silently no-op. Note: a CLI binary does
+  not appear in the Accessibility list by itself — the grant attaches to the **launching app**
+  (the terminal / Claude Code / login item that starts the agent). Granting that app is what
+  makes the agent trusted; `AXIsProcessTrusted()` then returns true for the child agent.
+- The synthesized chord must wait for the triggering hotkey's Ctrl+Shift to be released first,
+  or the held modifiers combine with it (a synthetic Cmd+C arriving while Ctrl is down reads as
+  Ctrl+Cmd+C and copies nothing). The copy path sleeps `HOTKEY_MODIFIER_RELEASE` (120ms) before
+  `paste.copy()`; the paste path already waits via `CLIPBOARD_SETTLE` after `set_text`. This was
+  the one real bug found during real-hardware verification.
+- The save/restore timing (`CLIPBOARD_SETTLE` / `PASTE_CONSUME` / `HOTKEY_MODIFIER_RELEASE`) is
+  heuristic; if a target app is slow to read the clipboard the restore could race. Tune if needed.
+
+Verified on real macOS hardware (2026-06-07): with Accessibility granted to the launching app,
+`Ctrl+Shift+V` pastes the inbox text into TextEdit and leaves the system clipboard unchanged,
+and `Ctrl+Shift+C` captures the TextEdit selection (published clip length matched the selection)
+and restores the clipboard. The copy direction initially published the stale clipboard until the
+`HOTKEY_MODIFIER_RELEASE` delay was added.
+
+Manual test (needs a real GUI session + Accessibility granted; cannot be automated):
+
+1. Run a receiver: `airpaste-agent --server-url ... --pair-code <code> --clipboard-mode isolated`.
+   On macOS, grant the binary Accessibility and restart it.
+2. Put a sentinel on the local clipboard (copy any text normally).
+3. From another paired device, publish text (e.g. copy in isolated mode there, or
+   `--publish-text-once "hello from isolated"`). Confirm the receiver logs
+   `stored remote text in isolated inbox` and the sentinel is still on the clipboard.
+4. Focus a text field, press `Ctrl+Shift+V`. Expect the inbox text to be typed in, and the
+   clipboard to still hold the sentinel afterward.
+5. Select some text, press `Ctrl+Shift+C`. Expect it to be published (receiver log
+   `pushed selection to AirPaste`) and your clipboard unchanged.
 
 ## Current File Transfer Security
 
@@ -250,6 +341,9 @@ Smoke coverage:
 - macOS scripted text sync (end-to-end encrypted publish on one device, decrypt + pasteboard apply on a paired device).
 - `airpaste-crypto` unit tests: encrypt/decrypt round-trip, persisted-identity decrypt, and that a non-recipient device cannot decrypt.
 - macOS scripted file URL publish, signed peer download, file URL pasteboard apply through `--apply-latest-files-once`.
+- macOS scripted encrypted-relay file pull (`scripts/smoke-relay-macos.sh`): forces `--prefer-relay true`, asserts the source served over the relay, the recipient downloaded via the relay, and the file is byte-exact (size + SHA-256). Also runs under `--auth-token`.
+- Peer file grant reservation unit tests (`airpaste-agent` `peer::tests`): a failed transfer releases the grant for retry, a completed transfer is one-time, and a rejected claim reserves nothing.
+- macOS scripted isolated-clipboard inbound test (`scripts/smoke-isolated-macos.sh`): a remote text clip is stored in the isolated inbox WITHOUT overwriting the system clipboard (sentinel survives, no system-clipboard apply path). Also runs under `--auth-token`. The synthetic Ctrl+Shift+C / Ctrl+Shift+V hotkeys are verified manually (see "Isolated Clipboard Mode").
 - macOS scripted server auth token path.
 - macOS interactive `Ctrl+Shift+V` hotkey harness exists as `scripts/smoke-hotkey-macos.sh`.
 - Trusted-device signed API guard path: missing signature returns `401`, untrusted signed request returns `403`, paired signed request is allowed, replayed nonce returns `401`.
@@ -292,13 +386,15 @@ Transfer:
 - Directories are represented in the manifest but skipped by transfer.
 - There is no recursive directory copy.
 - There is no resume, explicit chunk protocol, or transfer progress.
-- The relay data path is implemented (E2EE, server-forwarded). The receiver falls back to relay automatically when a direct/LAN download errors, and `--prefer-relay` forces it. Caveat: the automatic fallback re-pulls the whole transfer, so it only recovers cleanly when the direct attempt consumed no one-time grants (the dominant "source peer unreachable" case, where the first request fails at connect). A direct failure that occurs after the source already served some indexes will fail the relay retry with `410 already served`; the user re-copies.
-- The server relay forwards frames in memory with an unbounded per-direction queue; it enforces the session byte budget and TTL-at-connect, but does not cap in-flight buffering or enforce TTL mid-connection (the recipient's 30s receive timeout and source's 60s idle timeout bound stalls instead).
+- The relay data path is implemented (E2EE, server-forwarded). The receiver falls back to relay automatically when a direct/LAN download errors, and `--prefer-relay true` forces it. The fallback is now incremental and survives partial direct transfers: only still-missing indexes are pulled over the relay, and a source index is committed against its one-time grant only after the bytes finish streaming (a failed stream releases it), so a mid-transfer direct failure is completed over the relay instead of hitting `410 already served`. Residual edge: if the source finishes pushing an index's bytes but the recipient never receives the tail, that index is committed and a relay retry of *that* index would still see it served (no app-level delivery ACK yet); the partial fallback covers the common connect/mid-stream failures.
+- The server relay forwards frames in memory with a **bounded** per-direction queue (`RELAY_QUEUE_CAPACITY` frames, backpressured via split read/write tasks so neither direction deadlocks) and enforces the session byte budget plus the session TTL **mid-connection** (a `tokio::time::sleep` deadline tears the relay down at `expires_at`). The recipient's 30s receive timeout and source's 60s idle timeout still bound shorter stalls.
 
 Platform:
 
-- Windows supports clipboard text, file drop lists, `Ctrl+Shift+V`, and synthetic paste.
-- macOS supports clipboard text, file URL read/write, `Ctrl+Shift+V`, and one-shot file apply. Synthetic paste is not implemented yet.
+- Windows supports clipboard text, file drop lists, `Ctrl+Shift+V`, and synthetic copy/paste.
+- macOS supports clipboard text, file URL read/write, `Ctrl+Shift+V`, one-shot file apply, and now synthetic copy/paste via CoreGraphics `CGEvent` (used by isolated mode; requires Accessibility permission). The file-paste flow on macOS still does not auto-`Cmd+V` after apply (`REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY` is false on macOS); only isolated-mode text paste synthesizes the keystroke so far.
+- Isolated clipboard mode is text-only; file clips still use the system clipboard / pending-download flow.
+- The macOS synthetic copy/paste has been verified on real macOS hardware (Ctrl+Shift+V and Ctrl+Shift+C into TextEdit, system clipboard preserved) with Accessibility granted to the launching app. Windows synthetic copy/paste (SendInput) is compiled but not yet exercised on a real Windows session.
 - No tray UI, settings UI, installer, or service/login-item packaging yet.
 
 ## Recommended Next Steps
@@ -312,12 +408,21 @@ The relay was validated only on one macOS host (forced and auto-fallback). It ha
 run Mac<->Windows on real machines. Worth a quick real-machine check (e.g. on the receiver,
 make the source unreachable or pass `--prefer-relay`) before relying on it.
 
-### 1. Harden the relay / fallback
+### 1. Harden the relay / fallback — DONE this session (verify on real hardware per #0)
 
-- Make the direct->relay fallback robust to partial direct transfers (the one-time grant is
-  consumed per index on the source; re-pulling a served index over relay returns `410`).
-  Options: per-route grants, or do not mark an index served until the byte stream completes.
-- Bound the server relay's in-memory queues and enforce session TTL mid-connection.
+- ~~Make the direct->relay fallback robust to partial direct transfers.~~ Done: grants are
+  committed only after the byte stream completes (released on failure), and the fallback pulls
+  only still-missing indexes. See `crates/airpaste-agent/src/peer.rs` (`GrantStream`,
+  `commit_served`/`release`), `relay.rs`, and `main.rs` (`missing_file_indexes`,
+  `apply_file_clip`). Covered by `crates/airpaste-agent/src/peer.rs` unit tests and
+  `scripts/smoke-relay-macos.sh`.
+- ~~Bound the server relay's in-memory queues and enforce session TTL mid-connection.~~ Done:
+  see `crates/airpaste-server/src/relay.rs` (bounded channels + split read/write tasks) and
+  `routes.rs` (TTL passed to `relay_ws_handler`).
+- Remaining: there is still no app-level delivery ACK, so the one residual case is an index
+  whose bytes were fully pushed by the source but never received by the recipient — a relay
+  retry of that specific index would see it committed. Add an end-of-file ACK from the
+  recipient if this proves to matter in practice.
 
 ### 2. Extend encryption beyond text
 
@@ -334,6 +439,16 @@ make the source unreachable or pass `--prefer-relay`) before relying on it.
   announced in the manifest but skipped by transfer).
 - Add transfer progress / resume.
 
+### 3b. Finish isolated clipboard mode
+
+- macOS synthetic `Ctrl+Shift+C` / `Ctrl+Shift+V` verified on real hardware (held-modifier
+  leak fixed via `HOTKEY_MODIFIER_RELEASE`). Still TODO: verify the same on a real **Windows**
+  session, and confirm the save/restore timing is reliable across more apps (browsers,
+  Electron) beyond TextEdit.
+- Extend isolated mode to files (currently text-only): the inbox would need to hold the latest
+  pending file clip and `Ctrl+Shift+V` choose between text/files by recency.
+- Consider a small inbox history (latest N) and a way to pick which entry to paste.
+
 ### 3. Continue macOS Agent
 
 See `docs/MACOS_AGENT_PLAN.md`.
@@ -342,6 +457,6 @@ Useful next macOS steps:
 
 - Manually verify `Ctrl+Shift+V` against Finder and common target apps.
 - Use `scripts/smoke-hotkey-macos.sh` as the first manual hotkey check; it prepares a pending file clip and waits for a real `Ctrl+Shift+V`.
-- Add paste simulation with clear Accessibility permission handling.
+- Paste simulation now exists for macOS (`paste/macos.rs`, CoreGraphics `CGEvent`) with an Accessibility check; it is used by isolated-mode text paste and is the basis for wiring file-paste auto-`Cmd+V` later. Still needs real-session verification.
 - Decide whether to replace or augment `arboard` with lower-level `NSPasteboard` glue if file URL behavior is not reliable enough.
 - Add LaunchAgent/login item packaging later, after CLI behavior is stable.

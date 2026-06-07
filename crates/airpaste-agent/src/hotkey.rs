@@ -5,10 +5,19 @@ mod windows;
 mod macos;
 
 #[cfg(windows)]
-pub use windows::spawn_remote_paste_listener;
+pub use windows::spawn_hotkey_listener;
 
 #[cfg(target_os = "macos")]
-pub use macos::spawn_remote_paste_listener;
+pub use macos::spawn_hotkey_listener;
+
+/// A global hotkey the agent listens for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotkeyAction {
+    /// Ctrl+Shift+V — paste remote content (files, or in isolated mode the inbox text).
+    PasteRemote,
+    /// Ctrl+Shift+C — capture the current selection into the AirPaste channel (isolated mode).
+    CopyToAirPaste,
+}
 
 #[cfg(windows)]
 pub const REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY: bool = true;
@@ -20,8 +29,9 @@ pub const REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY: bool = false;
 pub const REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY: bool = false;
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn spawn_remote_paste_listener(
-    _sender: tokio::sync::mpsc::UnboundedSender<()>,
+pub fn spawn_hotkey_listener(
+    _sender: tokio::sync::mpsc::UnboundedSender<HotkeyAction>,
+    _enable_copy: bool,
 ) -> anyhow::Result<()> {
-    anyhow::bail!("remote paste hotkey MVP is currently implemented only on Windows and macOS")
+    anyhow::bail!("global hotkeys MVP is currently implemented only on Windows and macOS")
 }

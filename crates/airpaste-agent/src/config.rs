@@ -1,5 +1,17 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::{net::SocketAddr, path::PathBuf};
+
+/// How the agent relates to the local system clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ClipboardMode {
+    /// Sync with the system clipboard: auto-publish on copy, auto-apply remote text to the
+    /// clipboard. This is the original behaviour.
+    System,
+    /// Isolated channel: remote text is kept in an in-app inbox instead of overwriting the
+    /// system clipboard, and `Ctrl+Shift+C` / `Ctrl+Shift+V` move text in and out via
+    /// synthetic copy/paste without disturbing whatever is on the system clipboard.
+    Isolated,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "airpaste-agent")]
@@ -153,6 +165,17 @@ pub struct Args {
         action = clap::ArgAction::Set
     )]
     pub prefer_relay: bool,
+
+    /// Clipboard integration mode. `system` (default) syncs with the system clipboard;
+    /// `isolated` keeps remote text in an in-app inbox and uses Ctrl+Shift+C / Ctrl+Shift+V
+    /// to move text in and out without touching the system clipboard.
+    #[arg(
+        long,
+        env = "AIRPASTE_CLIPBOARD_MODE",
+        value_enum,
+        default_value_t = ClipboardMode::System
+    )]
+    pub clipboard_mode: ClipboardMode,
 }
 
 impl Args {
