@@ -59,7 +59,8 @@ The workspace currently contains:
 - `crates/airpaste-protocol`: REST and WebSocket DTOs.
 - `crates/airpaste-crypto`: end-to-end content encryption (X25519 key agreement + XChaCha20-Poly1305 AEAD, per-clip content key wrapped per recipient).
 - `crates/airpaste-server`: Axum control-plane server using `redb`.
-- `crates/airpaste-agent`: Windows/macOS agent MVP with end-to-end encrypted text sync, file manifest, peer file server, file download, remote paste hotkeys, Ed25519 device identity, and X25519 encryption identity.
+- `crates/airpaste-agent`: lib + thin bin. The agent MVP (E2EE text sync, file manifest, peer file server, file download, remote paste hotkeys, Ed25519/X25519 identities) lives in the `airpaste_agent` library; `run_cli()` is the CLI entry and `spawn_embedded(args) -> AgentHandle` lets the tray run it in-process.
+- `crates/airpaste-tray`: macOS menu-bar UI (egui/eframe + tray-icon) that embeds the agent. macOS-only (GUI deps are gated to macOS so the workspace still cross-compiles to Windows).
 
 ## Toolchain Notes
 
@@ -398,6 +399,35 @@ content). It also creates a publish feedback loop if the sender runs with
 `--publish-clipboard=true`. To verify system-clipboard landing cleanly, disable clipboard
 redirection in mstsc (Local Resources -> uncheck Clipboard) and retest.
 
+## Menu-bar UI (`airpaste-tray`)
+
+A macOS menu-bar app (egui/eframe window + `tray-icon` menu) that embeds the agent. The
+agent was extracted into the `airpaste_agent` library: `spawn_embedded(args)` starts it on a
+background Tokio runtime and returns an `AgentHandle` the UI polls for connection state,
+device id/name, clipboard mode, and the latest isolated-mode inbox text.
+
+Run it (accepts the same flags as the agent):
+
+```bash
+cargo run -p airpaste-tray -- --server-url http://<host> --pair-code <code> --clipboard-mode isolated
+# or just `cargo run -p airpaste-tray` to use the agent defaults
+```
+
+The window shows: connection status (● Connected / ○ Connecting), device + device id, mode,
+and the latest received text with a "Copy to clipboard" button. The tray menu has Show / Quit.
+
+Architecture: eframe owns the macOS main-thread event loop; the agent runs on a background
+Tokio runtime; the tray polls `AgentHandle` and `MenuEvent` each frame (200ms cadence).
+
+Verified on macOS: the embedded agent registers, upgrades the control WebSocket (101), and
+runs isolated mode with the global hotkeys; `cargo check --workspace` and the Windows
+cross-compile are unaffected (GUI deps gated to macOS).
+
+Not done yet (UI follow-ups): UI strings are English (egui's default fonts lack CJK glyphs —
+load a macOS CJK font like PingFang for a Chinese UI); the app still shows a Dock icon (make
+it menu-bar-only via `NSApplicationActivationPolicy.accessory`); no runtime isolated-mode
+toggle, pairing UI, settings, or inbox history yet (the `AgentHandle` is currently read-only).
+
 ## Important MVP Limitations
 
 Security and trust:
@@ -477,6 +507,13 @@ make the source unreachable or pass `--prefer-relay`) before relying on it.
 - Extend isolated mode to files (currently text-only): the inbox would need to hold the latest
   pending file clip and `Ctrl+Shift+V` choose between text/files by recency.
 - Consider a small inbox history (latest N) and a way to pick which entry to paste.
+
+### 3c. Menu-bar UI (`airpaste-tray`)
+
+The scaffold + agent wiring are done (see "Menu-bar UI"). Next: load a macOS CJK font so the
+UI can be Chinese; make it a menu-bar-only app (hide the Dock icon); add controls beyond the
+read-only handle (runtime isolated-mode toggle, pairing/config, inbox history) — these need
+the `AgentHandle` extended with a control channel back into the agent.
 
 ### 3. Continue macOS Agent
 
