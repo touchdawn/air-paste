@@ -199,6 +199,10 @@ impl Store {
         Ok(relay)
     }
 
+    pub fn get_relay_session(&self, session_id: &SessionId) -> StoreResult<Option<RelaySession>> {
+        self.get(RELAYS, session_id.as_str())
+    }
+
     fn put<T: Serialize>(
         &self,
         definition: TableDefinition<&str, &[u8]>,

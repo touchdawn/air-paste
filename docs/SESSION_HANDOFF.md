@@ -109,6 +109,7 @@ The server supports:
 - `GET /v1/clips/{clip_id}`
 - `DELETE /v1/clips/{clip_id}`
 - `POST /v1/relay/sessions`
+- `GET /v1/relay/{session_id}/ws` (relay data pipe; source and recipient connect, server forwards opaque frames)
 - `GET /v1/ws`
 
 Auth:
@@ -154,6 +155,8 @@ The agent:
 - Downloads pending files on `Ctrl+Shift+V`, writes downloaded cache paths to Windows file clipboard, then sends normal paste.
 - On macOS, downloads pending files on `Ctrl+Shift+V` and writes downloaded cache file URLs to the pasteboard. Synthetic `Cmd+V` paste is still intentionally out of scope.
 - Supports `--apply-latest-files-once` to fetch the latest remote file clip, download its files, write them to the local clipboard/pasteboard, print downloaded paths as JSON, and exit.
+- Pulls remote files through the server-mediated encrypted relay when started with `--prefer-relay`. The recipient creates a relay session; the server pushes `TransferRelayReady` to both devices; both connect to `GET /v1/relay/{session_id}/ws`; the source serves files claimed from its `PeerFileRegistry` (same signed peer-file authorization as the direct path), sealing each file for the recipient with `airpaste-crypto::seal_bytes`; the server only forwards opaque frames. Direct/LAN transfer is still the default.
+- Reconnects the control websocket with exponential backoff (2s up to 30s) and a 10s connect timeout, so a network drop or change does not busy-reconnect or hang. Relay connects also time out (10s); relay receives time out (recipient 30s, source idle 60s).
 - Uses macOS defaults `~/Library/Application Support/AirPaste/agent.json` for state and `~/Library/Caches/AirPaste` for cache when paths are not explicitly provided.
 
 Useful agent flags:
@@ -181,6 +184,7 @@ Useful agent flags:
 - `--remote-paste-hotkey=false`
 - `--publish-clipboard=false`
 - `--apply-remote=false`
+- `--prefer-relay` (pull files through the encrypted relay instead of direct/LAN)
 
 ## Current File Transfer Security
 
@@ -275,7 +279,8 @@ Transfer:
 - Directories are represented in the manifest but skipped by transfer.
 - There is no recursive directory copy.
 - There is no resume, explicit chunk protocol, or transfer progress.
-- Relay session metadata exists, but the relay data path is not implemented (the cross-network fallback when LAN discovery does not apply).
+- The relay data path is implemented (E2EE, server-forwarded), but is only used when the receiver sets `--prefer-relay`. There is no automatic fall back from a failed direct/LAN download to relay yet (blocked by the one-time-per-index grant: indexes served directly cannot be re-pulled over relay without a grant-semantics change).
+- The server relay forwards frames in memory with an unbounded per-direction queue; it enforces the session byte budget and TTL-at-connect, but does not cap in-flight buffering or enforce TTL mid-connection (the recipient's 30s receive timeout and source's 60s idle timeout bound stalls instead).
 
 Platform:
 

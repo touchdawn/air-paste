@@ -143,6 +143,16 @@ pub struct Args {
         action = clap::ArgAction::Set
     )]
     pub apply_remote: bool,
+
+    /// Pull remote files through the server-mediated encrypted relay instead of a direct
+    /// peer connection. Useful when the source's peer port is not reachable.
+    #[arg(
+        long,
+        env = "AIRPASTE_PREFER_RELAY",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub prefer_relay: bool,
 }
 
 impl Args {

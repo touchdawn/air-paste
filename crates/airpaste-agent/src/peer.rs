@@ -89,6 +89,36 @@ impl PeerFileRegistry {
         Ok(())
     }
 
+    /// Claim a file for relay delivery, reusing the same signed-request authorization,
+    /// clip binding, and one-time-per-index checks as the direct HTTP path.
+    /// Returns `Ok(path)` to serve, or `Err(reason)` to reject.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_relay_file(
+        &self,
+        token: &str,
+        index: usize,
+        clip_id: &str,
+        source_device_id: &str,
+        requester_device_id: &str,
+        signature_alg: &str,
+        signature: &str,
+    ) -> anyhow::Result<Result<PathBuf, &'static str>> {
+        let request = PeerFileRequest {
+            clip_id: clip_id.to_string(),
+            source_device_id: source_device_id.to_string(),
+            requester_device_id: requester_device_id.to_string(),
+            signature_alg: signature_alg.to_string(),
+            signature: signature.to_string(),
+        };
+        Ok(match self.claim(token, index, request)? {
+            PeerFileClaim::Available(path) => Ok(path),
+            PeerFileClaim::NotFound => Err("file not found"),
+            PeerFileClaim::Expired => Err("transfer token expired"),
+            PeerFileClaim::AlreadyServed => Err("file already downloaded"),
+            PeerFileClaim::Unauthorized(reason) => Err(reason),
+        })
+    }
+
     fn claim(
         &self,
         token: &str,

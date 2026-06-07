@@ -60,6 +60,7 @@ Useful endpoints:
 - `GET /v1/clips/latest`
 - `GET /v1/clips/history`
 - `POST /v1/relay/sessions`
+- `GET /v1/relay/{session_id}/ws`
 - `GET /v1/ws`
 
 Build both binaries with:
@@ -92,6 +93,7 @@ File transfer MVP notes:
 
 - The source agent exposes `GET /v1/files/{transfer_token}/{index}` on its `--peer-bind` address, which defaults to `0.0.0.0:17390` so peers on the LAN can reach it.
 - Agents discover each other on the LAN over mDNS (`_airpaste._tcp.local.`, `device_id` in TXT). The receiver prefers a discovered peer's address over the manifest, so `--peer-public-url` is usually unnecessary on a LAN. The file manifest still includes `source_peer_url` as a fallback when mDNS is unavailable; set `--peer-public-url` for that case.
+- When direct/LAN transfer is not possible, start the receiver with `--prefer-relay` to pull files through the server-mediated encrypted relay. Both devices connect outbound to `GET /v1/relay/{session_id}/ws`; the source seals each file end-to-end for the recipient (X25519 + XChaCha20-Poly1305) before it traverses the server, which only forwards opaque frames and never sees plaintext. The relay reuses the same signed peer-file authorization as the direct path.
 - Peer file requests must include `x-airpaste-clip-id`, `x-airpaste-source-device-id`, `x-airpaste-requester-device-id`, and an Ed25519 `x-airpaste-signature`; the source agent verifies the requester against trusted device public keys from the server.
 - The peer transfer token has a local TTL, defaults to 600 seconds, and each file index can be downloaded once.
 - File manifest publication is limited by `--max-file-count`, `--max-single-file-bytes`, and `--max-total-file-bytes`.

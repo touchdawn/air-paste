@@ -78,15 +78,23 @@ pub struct Recipient {
     pub public_key_base64: String,
 }
 
-/// Output of [`seal_text`]: the encrypted body plus per-recipient wrapped keys.
+/// Output of [`seal_text`]: the encrypted body (base64) plus per-recipient wrapped keys.
 pub struct SealedText {
     pub body_ciphertext_base64: String,
     pub body_nonce_base64: String,
     pub wrapped_keys: Vec<WrappedKey>,
 }
 
-/// Encrypt `plaintext` for every recipient. Returns an error if `recipients` is empty.
-pub fn seal_text(plaintext: &str, recipients: &[Recipient]) -> Result<SealedText, CryptoError> {
+/// Output of [`seal_bytes`]: the raw encrypted body plus per-recipient wrapped keys.
+/// Used for binary payloads (e.g. relayed file streams) where base64 would be wasteful.
+pub struct SealedBytes {
+    pub body_ciphertext: Vec<u8>,
+    pub body_nonce: [u8; NONCE_LEN],
+    pub wrapped_keys: Vec<WrappedKey>,
+}
+
+/// Encrypt arbitrary bytes for every recipient. Returns an error if `recipients` is empty.
+pub fn seal_bytes(plaintext: &[u8], recipients: &[Recipient]) -> Result<SealedBytes, CryptoError> {
     if recipients.is_empty() {
         return Err(CryptoError::NoWrappedKey);
     }
@@ -101,7 +109,7 @@ pub fn seal_text(plaintext: &str, recipients: &[Recipient]) -> Result<SealedText
         .encrypt(
             XNonce::from_slice(&body_nonce),
             Payload {
-                msg: plaintext.as_bytes(),
+                msg: plaintext,
                 aad: BODY_AAD,
             },
         )
@@ -135,21 +143,31 @@ pub fn seal_text(plaintext: &str, recipients: &[Recipient]) -> Result<SealedText
         });
     }
 
-    Ok(SealedText {
-        body_ciphertext_base64: STANDARD.encode(body_ciphertext),
-        body_nonce_base64: STANDARD.encode(body_nonce),
+    Ok(SealedBytes {
+        body_ciphertext,
+        body_nonce,
         wrapped_keys,
     })
 }
 
-/// Decrypt a sealed text body using this device's wrapped key.
-pub fn open_text(
-    body_ciphertext_base64: &str,
-    body_nonce_base64: &str,
+/// Encrypt `plaintext` for every recipient. Returns an error if `recipients` is empty.
+pub fn seal_text(plaintext: &str, recipients: &[Recipient]) -> Result<SealedText, CryptoError> {
+    let sealed = seal_bytes(plaintext.as_bytes(), recipients)?;
+    Ok(SealedText {
+        body_ciphertext_base64: STANDARD.encode(sealed.body_ciphertext),
+        body_nonce_base64: STANDARD.encode(sealed.body_nonce),
+        wrapped_keys: sealed.wrapped_keys,
+    })
+}
+
+/// Decrypt a sealed binary body using this device's wrapped key.
+pub fn open_bytes(
+    body_ciphertext: &[u8],
+    body_nonce: &[u8],
     wrapped_keys: &[WrappedKey],
     device_id: &DeviceId,
     identity: &EncryptionIdentity,
-) -> Result<String, CryptoError> {
+) -> Result<Vec<u8>, CryptoError> {
     let wrapped = wrapped_keys
         .iter()
         .find(|key| &key.device_id == device_id)
@@ -173,19 +191,38 @@ pub fn open_text(
         .map_err(|_| CryptoError::Aead)?;
     let cek: [u8; KEY_LEN] = cek.as_slice().try_into().map_err(|_| CryptoError::Length)?;
 
-    let body_nonce = decode_array::<NONCE_LEN>(body_nonce_base64)?;
-    let body_ct = STANDARD.decode(body_ciphertext_base64)?;
+    if body_nonce.len() != NONCE_LEN {
+        return Err(CryptoError::Length);
+    }
     let body_cipher = XChaCha20Poly1305::new_from_slice(&cek).map_err(|_| CryptoError::Length)?;
-    let plaintext = body_cipher
+    body_cipher
         .decrypt(
-            XNonce::from_slice(&body_nonce),
+            XNonce::from_slice(body_nonce),
             Payload {
-                msg: &body_ct,
+                msg: body_ciphertext,
                 aad: BODY_AAD,
             },
         )
-        .map_err(|_| CryptoError::Aead)?;
+        .map_err(|_| CryptoError::Aead)
+}
 
+/// Decrypt a sealed text body using this device's wrapped key.
+pub fn open_text(
+    body_ciphertext_base64: &str,
+    body_nonce_base64: &str,
+    wrapped_keys: &[WrappedKey],
+    device_id: &DeviceId,
+    identity: &EncryptionIdentity,
+) -> Result<String, CryptoError> {
+    let body_ciphertext = STANDARD.decode(body_ciphertext_base64)?;
+    let body_nonce = STANDARD.decode(body_nonce_base64)?;
+    let plaintext = open_bytes(
+        &body_ciphertext,
+        &body_nonce,
+        wrapped_keys,
+        device_id,
+        identity,
+    )?;
     String::from_utf8(plaintext).map_err(|_| CryptoError::Utf8)
 }
 

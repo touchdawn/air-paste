@@ -6,6 +6,7 @@ mod hotkey;
 mod identity;
 mod paste;
 mod peer;
+mod relay;
 mod state_file;
 
 use crate::{
@@ -42,6 +43,13 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Timeout for establishing a websocket connection (control or relay) so a hung connect
+/// during a network change recovers quickly instead of blocking on the OS TCP timeout.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Base and max delay between control-websocket reconnect attempts (exponential backoff).
+const WS_RECONNECT_BASE: Duration = Duration::from_secs(2);
+const WS_RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct FileTransferPolicy {
@@ -149,8 +157,10 @@ async fn main() -> anyhow::Result<()> {
             &device_id,
             &last_local_file_write,
             &identity,
+            &encryption,
             &file_policy,
             &PeerDirectory::default(),
+            args.prefer_relay,
             &cache_dir,
         )
         .await
@@ -215,6 +225,9 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+    let ws_peer_registry = peer_registry.clone();
+    let prefer_relay = args.prefer_relay;
+
     let poll_task = if args.publish_clipboard {
         tokio::spawn(poll_clipboard(
             client.clone(),
@@ -239,10 +252,12 @@ async fn main() -> anyhow::Result<()> {
         device_id,
         encryption,
         peer_directory,
+        ws_peer_registry,
         last_local_write,
         last_local_file_write,
         pending_file_clip,
         args.apply_remote,
+        prefer_relay,
         paste,
         identity,
         args.remote_paste_hotkey,
@@ -921,16 +936,19 @@ fn clipboard_signature(paths: &[std::path::PathBuf]) -> Option<String> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ws(
     client: ServerClient,
     clipboard: Arc<Clipboard>,
     device_id: DeviceId,
     encryption: Arc<EncryptionIdentity>,
     peer_directory: PeerDirectory,
+    peer_registry: PeerFileRegistry,
     last_local_write: Arc<Mutex<Option<String>>>,
     last_local_file_write: Arc<Mutex<Option<String>>>,
     pending_file_clip: Arc<Mutex<Option<PendingFileClip>>>,
     apply_remote: bool,
+    prefer_relay: bool,
     paste: Arc<PasteSimulator>,
     identity: Arc<DeviceIdentity>,
     remote_paste_hotkey: bool,
@@ -950,6 +968,7 @@ async fn run_ws(
                 let hotkey_pending_file_clip = pending_file_clip.clone();
                 let hotkey_paste = paste.clone();
                 let hotkey_identity = identity.clone();
+                let hotkey_encryption = encryption.clone();
                 let hotkey_file_policy = file_policy.clone();
                 let hotkey_peer_directory = peer_directory.clone();
                 let hotkey_cache_dir = cache_dir.clone();
@@ -964,8 +983,10 @@ async fn run_ws(
                             &hotkey_pending_file_clip,
                             &hotkey_paste,
                             &hotkey_identity,
+                            &hotkey_encryption,
                             &hotkey_file_policy,
                             &hotkey_peer_directory,
+                            prefer_relay,
                             paste_after_hotkey,
                             &hotkey_cache_dir,
                         )
@@ -981,17 +1002,20 @@ async fn run_ws(
         }
     }
 
+    let mut backoff = WS_RECONNECT_BASE;
     loop {
-        match run_ws_once(
+        let outcome = run_ws_once(
             &client,
             &clipboard,
             &device_id,
             &encryption,
             &peer_directory,
+            &peer_registry,
             &last_local_write,
             &last_local_file_write,
             &pending_file_clip,
             apply_remote,
+            prefer_relay,
             &paste,
             &identity,
             &file_policy,
@@ -999,25 +1023,36 @@ async fn run_ws(
             auto_paste_files,
             &cache_dir,
         )
-        .await
-        {
+        .await;
+        match &outcome {
             Ok(()) => tracing::warn!("websocket disconnected"),
             Err(error) => tracing::warn!(%error, "websocket failed"),
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // A clean session (we were connected) resets the backoff; repeated connect
+        // failures back off exponentially so a network outage does not busy-reconnect.
+        if outcome.is_ok() {
+            backoff = WS_RECONNECT_BASE;
+        }
+        tokio::time::sleep(backoff).await;
+        if outcome.is_err() {
+            backoff = (backoff * 2).min(WS_RECONNECT_MAX);
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ws_once(
     client: &ServerClient,
     clipboard: &Clipboard,
     device_id: &DeviceId,
     encryption: &EncryptionIdentity,
     peer_directory: &PeerDirectory,
+    peer_registry: &PeerFileRegistry,
     last_local_write: &Mutex<Option<String>>,
     last_local_file_write: &Mutex<Option<String>>,
     pending_file_clip: &Mutex<Option<PendingFileClip>>,
     apply_remote: bool,
+    prefer_relay: bool,
     paste: &PasteSimulator,
     identity: &DeviceIdentity,
     file_policy: &FileTransferPolicy,
@@ -1025,7 +1060,10 @@ async fn run_ws_once(
     auto_paste_files: bool,
     cache_dir: &Path,
 ) -> anyhow::Result<()> {
-    let (ws, _) = tokio_tungstenite::connect_async(client.ws_request().await?).await?;
+    let request = client.ws_request().await?;
+    let (ws, _) = tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
+        .await
+        .map_err(|_| anyhow::anyhow!("websocket connect timed out"))??;
     let (mut writer, mut reader) = ws.split();
     writer
         .send(Message::Text(serde_json::to_string(
@@ -1047,11 +1085,13 @@ async fn run_ws_once(
             device_id,
             encryption,
             peer_directory,
+            peer_registry,
             last_local_write,
             last_local_file_write,
             pending_file_clip,
             event,
             apply_remote,
+            prefer_relay,
             paste,
             identity,
             file_policy,
@@ -1064,17 +1104,20 @@ async fn run_ws_once(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_server_event(
     client: &ServerClient,
     clipboard: &Clipboard,
     device_id: &DeviceId,
     encryption: &EncryptionIdentity,
     peer_directory: &PeerDirectory,
+    peer_registry: &PeerFileRegistry,
     last_local_write: &Mutex<Option<String>>,
     last_local_file_write: &Mutex<Option<String>>,
     pending_file_clip: &Mutex<Option<PendingFileClip>>,
     event: ServerEvent,
     apply_remote: bool,
+    prefer_relay: bool,
     paste: &PasteSimulator,
     identity: &DeviceIdentity,
     file_policy: &FileTransferPolicy,
@@ -1133,13 +1176,37 @@ async fn handle_server_event(
                     pending_file_clip,
                     paste,
                     identity,
+                    encryption,
                     file_policy,
                     peer_directory,
+                    prefer_relay,
                     auto_paste_files,
                     cache_dir,
                 )
                 .await?;
             }
+        }
+        ServerEvent::TransferRelayReady {
+            session_id,
+            source_device_id,
+            recipient_device_id,
+            ..
+        } if source_device_id == *device_id => {
+            // We are the source: connect to the relay and serve files to the recipient.
+            let serve_client = client.clone();
+            let serve_registry = peer_registry.clone();
+            tokio::spawn(async move {
+                if let Err(error) = relay::serve_relay_session(
+                    serve_client,
+                    serve_registry,
+                    session_id,
+                    recipient_device_id,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "relay source session failed");
+                }
+            });
         }
         ServerEvent::HelloAck { .. }
         | ServerEvent::DeviceOnline { .. }
@@ -1155,6 +1222,7 @@ async fn handle_server_event(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_pending_file_clip(
     client: &ServerClient,
     clipboard: &Clipboard,
@@ -1163,8 +1231,10 @@ async fn apply_pending_file_clip(
     pending_file_clip: &Mutex<Option<PendingFileClip>>,
     paste: &PasteSimulator,
     identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
     file_policy: &FileTransferPolicy,
     peer_directory: &PeerDirectory,
+    prefer_relay: bool,
     paste_after_apply: bool,
     cache_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
@@ -1179,8 +1249,10 @@ async fn apply_pending_file_clip(
         last_local_file_write,
         &pending,
         identity,
+        encryption,
         file_policy,
         peer_directory,
+        prefer_relay,
         cache_dir,
     )
     .await?;
@@ -1194,14 +1266,17 @@ async fn apply_pending_file_clip(
     Ok(downloaded_files)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_latest_files_once(
     client: &ServerClient,
     clipboard: &Clipboard,
     requester_device_id: &DeviceId,
     last_local_file_write: &Mutex<Option<String>>,
     identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
     file_policy: &FileTransferPolicy,
     peer_directory: &PeerDirectory,
+    prefer_relay: bool,
     cache_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let Some(clip) = client.latest_clip().await? else {
@@ -1229,13 +1304,16 @@ async fn apply_latest_files_once(
         last_local_file_write,
         &pending,
         identity,
+        encryption,
         file_policy,
         peer_directory,
+        prefer_relay,
         cache_dir,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_file_clip(
     client: &ServerClient,
     clipboard: &Clipboard,
@@ -1243,21 +1321,41 @@ async fn apply_file_clip(
     last_local_file_write: &Mutex<Option<String>>,
     pending: &PendingFileClip,
     identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
     file_policy: &FileTransferPolicy,
     peer_directory: &PeerDirectory,
+    prefer_relay: bool,
     cache_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     validate_file_clip(&pending.file_clip, file_policy)?;
 
-    let downloaded_files = download_remote_files(
-        client,
-        cache_dir,
-        requester_device_id,
-        identity,
-        peer_directory,
-        pending,
-    )
-    .await?;
+    let downloaded_files = if prefer_relay {
+        tracing::info!(
+            source_device_id = %pending.source_device_id,
+            "pulling remote files through the encrypted relay"
+        );
+        relay::download_via_relay(
+            client,
+            identity,
+            encryption,
+            requester_device_id,
+            &pending.clip_id,
+            &pending.source_device_id,
+            &pending.file_clip,
+            cache_dir,
+        )
+        .await?
+    } else {
+        download_remote_files(
+            client,
+            cache_dir,
+            requester_device_id,
+            identity,
+            peer_directory,
+            pending,
+        )
+        .await?
+    };
     if downloaded_files.is_empty() {
         bail!("remote file clip did not contain downloadable files");
     }

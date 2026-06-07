@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::{
 #[derive(Clone)]
 pub struct ServerClient {
     base_url: String,
-    ws_url: String,
+    ws_origin: String,
     auth_token: Option<String>,
     request_identity: Arc<RwLock<Option<RequestIdentity>>>,
     http: reqwest::Client,
@@ -41,17 +41,17 @@ struct RequestIdentity {
 impl ServerClient {
     pub fn new(base_url: String, auth_token: Option<String>) -> anyhow::Result<Self> {
         let base_url = base_url.trim_end_matches('/').to_string();
-        let ws_url = if let Some(rest) = base_url.strip_prefix("https://") {
-            format!("wss://{rest}/v1/ws")
+        let ws_origin = if let Some(rest) = base_url.strip_prefix("https://") {
+            format!("wss://{rest}")
         } else if let Some(rest) = base_url.strip_prefix("http://") {
-            format!("ws://{rest}/v1/ws")
+            format!("ws://{rest}")
         } else {
             anyhow::bail!("server URL must start with http:// or https://");
         };
 
         Ok(Self {
             base_url,
-            ws_url,
+            ws_origin,
             auth_token,
             request_identity: Arc::new(RwLock::new(None)),
             http: reqwest::Client::new(),
@@ -66,7 +66,17 @@ impl ServerClient {
     }
 
     pub async fn ws_request(&self) -> anyhow::Result<Request> {
-        let mut request = self.ws_url.as_str().into_client_request()?;
+        self.signed_ws_request("/v1/ws").await
+    }
+
+    pub async fn relay_ws_request(&self, session_id: &str) -> anyhow::Result<Request> {
+        self.signed_ws_request(&format!("/v1/relay/{session_id}/ws"))
+            .await
+    }
+
+    async fn signed_ws_request(&self, path_and_query: &str) -> anyhow::Result<Request> {
+        let url = format!("{}{}", self.ws_origin, path_and_query);
+        let mut request = url.as_str().into_client_request()?;
         if let Some(token) = &self.auth_token {
             request.headers_mut().insert(
                 AUTHORIZATION,
@@ -78,7 +88,6 @@ impl ServerClient {
         let Some(request_identity) = self.request_identity.read().await.clone() else {
             anyhow::bail!("websocket request requires registered device identity");
         };
-        let path_and_query = "/v1/ws";
         let signature_headers = rest_signature_headers(
             "GET",
             path_and_query,

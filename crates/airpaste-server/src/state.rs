@@ -1,4 +1,4 @@
-use crate::store::Store;
+use crate::{relay::RelayHub, store::Store};
 use airpaste_core::DeviceId;
 use airpaste_protocol::ServerEvent;
 use std::{
@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, RwLock};
 pub struct AppState {
     pub store: Store,
     pub hub: EventHub,
+    pub relay_hub: RelayHub,
     pub auth_token: Option<String>,
     nonce_cache: NonceCache,
 }
@@ -21,6 +22,7 @@ impl AppState {
         Self {
             store,
             hub: EventHub::new(),
+            relay_hub: RelayHub::new(),
             auth_token,
             nonce_cache: NonceCache::new(Duration::from_secs(300)),
         }

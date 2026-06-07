@@ -1,3 +1,4 @@
+mod relay;
 mod routes;
 mod state;
 mod store;

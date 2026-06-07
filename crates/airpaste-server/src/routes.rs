@@ -1,5 +1,10 @@
-use crate::{state::AppState, store::StoreError, ws::ws_handler};
-use airpaste_core::{now, ClipId, ClipRecord, Device, DeviceId};
+use crate::{
+    relay::{relay_ws_handler, RelayRole},
+    state::AppState,
+    store::StoreError,
+    ws::ws_handler,
+};
+use airpaste_core::{now, ClipId, ClipRecord, Device, DeviceId, SessionId};
 use airpaste_protocol::{
     rest_body_sha256_base64url, rest_signing_message, ClipSummary, ConfirmPairingRequest,
     ConfirmPairingResponse, CreateClipRequest, CreateClipResponse, CreateRelaySessionRequest,
@@ -38,6 +43,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/clips/history", get(clip_history))
         .route("/v1/clips/:clip_id", get(get_clip).delete(delete_clip))
         .route("/v1/relay/sessions", post(create_relay_session))
+        .route("/v1/relay/:session_id/ws", get(relay_ws_upgrade))
         .route("/v1/ws", get(ws_upgrade))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state)
@@ -235,6 +241,40 @@ async fn ws_upgrade(
     ws: WebSocketUpgrade,
 ) -> Response {
     ws.on_upgrade(move |socket| ws_handler(socket, state, request_device.device_id))
+}
+
+async fn relay_ws_upgrade(
+    State(state): State<Arc<AppState>>,
+    TrustedDevice(request_device): TrustedDevice,
+    Path(session_id): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let session_id = SessionId::from(session_id);
+    let session = match state.store.get_relay_session(&session_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return (StatusCode::NOT_FOUND, "relay session not found").into_response(),
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+
+    if session.expires_at <= now() {
+        return (StatusCode::GONE, "relay session expired").into_response();
+    }
+
+    let role = if request_device.device_id == session.source_device_id {
+        RelayRole::Source
+    } else if request_device.device_id == session.recipient_device_id {
+        RelayRole::Recipient
+    } else {
+        return (
+            StatusCode::FORBIDDEN,
+            "device is not a party to this relay session",
+        )
+            .into_response();
+    };
+
+    let hub = state.relay_hub.clone();
+    let max_bytes = session.max_bytes;
+    ws.on_upgrade(move |socket| relay_ws_handler(socket, hub, session_id, role, max_bytes))
 }
 
 async fn require_auth(
