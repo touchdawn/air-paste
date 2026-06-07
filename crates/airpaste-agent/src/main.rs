@@ -546,6 +546,9 @@ fn text_publish_skip_reason(text: &str, policy: &TextPublishPolicy) -> Option<&'
     if contains_bearer_token(trimmed) {
         return Some("bearer token");
     }
+    if contains_provider_token(trimmed) {
+        return Some("provider token");
+    }
     if contains_secret_assignment(trimmed) {
         return Some("secret assignment");
     }
@@ -595,6 +598,16 @@ fn contains_bearer_token(text: &str) -> bool {
                 && pair[1].len() >= 20
                 && pair[1].bytes().all(is_token_byte)
         })
+}
+
+fn contains_provider_token(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let token = word.trim_matches(['"', '\'', '`', ',', ';']);
+        let lower = token.to_ascii_lowercase();
+        lower.starts_with("github_pat_")
+            || lower.starts_with("ghp_")
+            || (lower.starts_with("sk-") && token.len() >= 32)
+    })
 }
 
 fn contains_secret_assignment(text: &str) -> bool {
@@ -729,6 +742,28 @@ mod tests {
         assert_eq!(
             text_publish_skip_reason("4111 1111 1111 1111", &policy),
             Some("credit-card-like number")
+        );
+    }
+
+    #[test]
+    fn skips_provider_tokens() {
+        let policy = default_policy();
+        assert_eq!(
+            text_publish_skip_reason("ghp_0123456789abcdefghijklmnopqrstuvwx", &policy),
+            Some("provider token")
+        );
+        assert_eq!(
+            text_publish_skip_reason("github_pat_11ABCDEFG0abcdefghij_0123456789", &policy),
+            Some("provider token")
+        );
+        assert_eq!(
+            text_publish_skip_reason("sk-abcdefghijklmnopqrstuvwxyz0123456789", &policy),
+            Some("provider token")
+        );
+        // Short "sk-" words must not trip the provider-token filter.
+        assert_eq!(
+            text_publish_skip_reason("sk-123 is a ski resort code", &policy),
+            None
         );
     }
 

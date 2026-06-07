@@ -117,7 +117,7 @@ The agent:
 - Can confirm pairing with `--pair-code <code>`.
 - Publishes and applies text clipboard clips.
 - Gives text clips a default 600-second `expires_at`; use `--text-clip-ttl-secs 0` to publish non-expiring text clips for debugging.
-- Skips automatic text clipboard publish for obvious sensitive content by default: private keys, JWTs, bearer tokens, secret-like assignments, one-time-code-like numbers, credit-card-like numbers, and text above `--max-text-clip-bytes`.
+- Skips automatic text clipboard publish for obvious sensitive content by default: private keys, JWTs, bearer tokens, provider tokens (`ghp_`, `github_pat_`, `sk-`), secret-like assignments, one-time-code-like numbers, credit-card-like numbers, and text above `--max-text-clip-bytes`.
 - Publishes file clipboard manifests from Windows `CF_HDROP` and macOS file URLs.
 - Runs a peer HTTP server on `--peer-bind`, default `127.0.0.1:17390`.
 - Receives remote file manifests and records them as pending by default.

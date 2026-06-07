@@ -83,7 +83,7 @@ Current agent scope:
 - Downloaded files are written back to the system clipboard as a file drop list.
 - Windows remote file paste hotkey: `Ctrl+Shift+V`.
 - Text clips published by the agent default to a 600-second server-side TTL. Use `--text-clip-ttl-secs 0` to disable text expiry for debugging.
-- Automatic text clipboard publishing skips obvious sensitive content by default, including private keys, JWTs, bearer tokens, secret-like assignments, one-time-code-like numbers, credit-card-like numbers, and text above `--max-text-clip-bytes`. Use `--filter-sensitive-text=false` for debugging.
+- Automatic text clipboard publishing skips obvious sensitive content by default, including private keys, JWTs, bearer tokens, provider tokens (`ghp_`, `github_pat_`, `sk-`), secret-like assignments, one-time-code-like numbers, credit-card-like numbers, and text above `--max-text-clip-bytes`. Use `--filter-sensitive-text=false` for debugging.
 
 File transfer MVP notes:
 
