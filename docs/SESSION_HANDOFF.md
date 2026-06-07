@@ -413,20 +413,34 @@ cargo run -p airpaste-tray -- --server-url http://<host> --pair-code <code> --cl
 # or just `cargo run -p airpaste-tray` to use the agent defaults
 ```
 
-The window shows: connection status (● Connected / ○ Connecting), device + device id, mode,
-and the latest received text with a "Copy to clipboard" button. The tray menu has Show / Quit.
+The window (Chinese UI) shows: connection status (● 已连接 / ○ 连接中), device + device id, an
+**isolated-mode checkbox** (toggles at runtime), and the latest received text with a "复制到剪贴板"
+button. The tray menu has 显示 / 退出.
+
+Implemented:
+
+- **Chinese UI**: a macOS CJK font (Arial Unicode.ttf, fallback Hiragino/STHeiti) is installed
+  into egui's `FontDefinitions` (egui's default fonts have no CJK glyphs).
+- **Menu-bar-only**: runs with `NSApplicationActivationPolicy.accessory` (via the eframe
+  event-loop-builder hook + winit's macOS ext) — no Dock icon, no app menu bar. The window's
+  close button hides the window (app stays in the menu bar); only the tray's 退出 exits.
+- **Runtime isolated toggle**: isolated mode is a shared `AtomicBool` read live by the agent;
+  `AgentHandle::set_isolated` + the checkbox flip it without restarting. The tray defaults to
+  isolated (`AIRPASTE_CLIPBOARD_MODE`) so both hotkeys register. Caveat: the inbound/outbound
+  text behaviour toggles live, but the `Ctrl+Shift+C` hotkey is only registered if the agent
+  *started* isolated (hotkeys cannot be re-registered after launch).
 
 Architecture: eframe owns the macOS main-thread event loop; the agent runs on a background
 Tokio runtime; the tray polls `AgentHandle` and `MenuEvent` each frame (200ms cadence).
 
 Verified on macOS: the embedded agent registers, upgrades the control WebSocket (101), and
-runs isolated mode with the global hotkeys; `cargo check --workspace` and the Windows
-cross-compile are unaffected (GUI deps gated to macOS).
+runs isolated mode with the global hotkeys; the font atlas + accessory mode launch without
+panics; `cargo check --workspace`, the unit tests, the three macOS smokes, and the Windows
+cross-compile are all unaffected (GUI deps gated to macOS).
 
-Not done yet (UI follow-ups): UI strings are English (egui's default fonts lack CJK glyphs —
-load a macOS CJK font like PingFang for a Chinese UI); the app still shows a Dock icon (make
-it menu-bar-only via `NSApplicationActivationPolicy.accessory`); no runtime isolated-mode
-toggle, pairing UI, settings, or inbox history yet (the `AgentHandle` is currently read-only).
+Not done yet (UI follow-ups): pairing/config UI and inbox history (the `AgentHandle` control
+surface is currently just `set_isolated`); a real app icon (the menu-bar icon is a drawn
+disc); packaging as a `.app` / login item.
 
 ## Important MVP Limitations
 
@@ -510,10 +524,11 @@ make the source unreachable or pass `--prefer-relay`) before relying on it.
 
 ### 3c. Menu-bar UI (`airpaste-tray`)
 
-The scaffold + agent wiring are done (see "Menu-bar UI"). Next: load a macOS CJK font so the
-UI can be Chinese; make it a menu-bar-only app (hide the Dock icon); add controls beyond the
-read-only handle (runtime isolated-mode toggle, pairing/config, inbox history) — these need
-the `AgentHandle` extended with a control channel back into the agent.
+Done: scaffold + agent wiring, Chinese UI (CJK font), menu-bar-only (accessory, close-to-hide),
+and a runtime isolated-mode toggle (see "Menu-bar UI"). Next: pairing/config UI and inbox
+history (extend `AgentHandle`'s control surface beyond `set_isolated`); a real app icon; and
+package it as a `.app` / login item. A real-session pass to eyeball the Chinese rendering, the
+absent Dock icon, and the toggle is still worthwhile.
 
 ### 3. Continue macOS Agent
 
