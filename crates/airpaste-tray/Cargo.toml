@@ -5,8 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# macOS-first menu-bar UI. The GUI stack is only pulled in on macOS so the rest of the
-# workspace still builds (and cross-compiles to Windows) without the eframe/tray-icon tree.
+# macOS-first menu-bar UI. The GUI stack + embedded agent are only pulled in on macOS so the
+# rest of the workspace still builds (and cross-compiles to Windows) without the eframe tree.
 [target.'cfg(target_os = "macos")'.dependencies]
+airpaste-agent = { path = "../airpaste-agent" }
 eframe.workspace = true
 tray-icon.workspace = true
+tokio.workspace = true

@@ -171,6 +171,11 @@ pub fn init_tracing() {
         .try_init();
 }
 
+/// Parse agent arguments from the process command line (so embedders need no `clap` dep).
+pub fn parse_args() -> Args {
+    Args::parse()
+}
+
 /// CLI entry point: initialize tracing, parse args, and run to completion.
 pub async fn run_cli() -> anyhow::Result<()> {
     init_tracing();

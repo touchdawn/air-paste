@@ -239,7 +239,9 @@ dependencies = [
 name = "airpaste-tray"
 version = "0.1.0"
 dependencies = [
+ "airpaste-agent",
  "eframe",
+ "tokio",
  "tray-icon",
 ]
 
