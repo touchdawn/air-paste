@@ -1,6 +1,7 @@
 mod client;
 mod clipboard;
 mod config;
+mod discovery;
 mod hotkey;
 mod identity;
 mod paste;
@@ -11,6 +12,7 @@ use crate::{
     client::ServerClient,
     clipboard::Clipboard,
     config::Args,
+    discovery::PeerDirectory,
     hotkey::{spawn_remote_paste_listener, REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY},
     identity::DeviceIdentity,
     paste::PasteSimulator,
@@ -148,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
             &last_local_file_write,
             &identity,
             &file_policy,
+            &PeerDirectory::default(),
             &cache_dir,
         )
         .await
@@ -203,6 +206,15 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| format!("http://{}", args.peer_bind));
     let peer_task = tokio::spawn(run_peer_server(args.peer_bind, peer_registry.clone()));
 
+    let (_mdns_daemon, peer_directory) =
+        match discovery::start(&device_id, &device_name, args.peer_bind.port()) {
+            Ok((daemon, directory)) => (Some(daemon), directory),
+            Err(error) => {
+                tracing::warn!(%error, "mDNS discovery disabled; falling back to source_peer_url");
+                (None, PeerDirectory::default())
+            }
+        };
+
     let poll_task = if args.publish_clipboard {
         tokio::spawn(poll_clipboard(
             client.clone(),
@@ -226,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
         clipboard,
         device_id,
         encryption,
+        peer_directory,
         last_local_write,
         last_local_file_write,
         pending_file_clip,
@@ -913,6 +926,7 @@ async fn run_ws(
     clipboard: Arc<Clipboard>,
     device_id: DeviceId,
     encryption: Arc<EncryptionIdentity>,
+    peer_directory: PeerDirectory,
     last_local_write: Arc<Mutex<Option<String>>>,
     last_local_file_write: Arc<Mutex<Option<String>>>,
     pending_file_clip: Arc<Mutex<Option<PendingFileClip>>>,
@@ -937,6 +951,7 @@ async fn run_ws(
                 let hotkey_paste = paste.clone();
                 let hotkey_identity = identity.clone();
                 let hotkey_file_policy = file_policy.clone();
+                let hotkey_peer_directory = peer_directory.clone();
                 let hotkey_cache_dir = cache_dir.clone();
                 let paste_after_hotkey = REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY;
                 tokio::spawn(async move {
@@ -950,6 +965,7 @@ async fn run_ws(
                             &hotkey_paste,
                             &hotkey_identity,
                             &hotkey_file_policy,
+                            &hotkey_peer_directory,
                             paste_after_hotkey,
                             &hotkey_cache_dir,
                         )
@@ -971,6 +987,7 @@ async fn run_ws(
             &clipboard,
             &device_id,
             &encryption,
+            &peer_directory,
             &last_local_write,
             &last_local_file_write,
             &pending_file_clip,
@@ -996,6 +1013,7 @@ async fn run_ws_once(
     clipboard: &Clipboard,
     device_id: &DeviceId,
     encryption: &EncryptionIdentity,
+    peer_directory: &PeerDirectory,
     last_local_write: &Mutex<Option<String>>,
     last_local_file_write: &Mutex<Option<String>>,
     pending_file_clip: &Mutex<Option<PendingFileClip>>,
@@ -1028,6 +1046,7 @@ async fn run_ws_once(
             clipboard,
             device_id,
             encryption,
+            peer_directory,
             last_local_write,
             last_local_file_write,
             pending_file_clip,
@@ -1050,6 +1069,7 @@ async fn handle_server_event(
     clipboard: &Clipboard,
     device_id: &DeviceId,
     encryption: &EncryptionIdentity,
+    peer_directory: &PeerDirectory,
     last_local_write: &Mutex<Option<String>>,
     last_local_file_write: &Mutex<Option<String>>,
     pending_file_clip: &Mutex<Option<PendingFileClip>>,
@@ -1114,6 +1134,7 @@ async fn handle_server_event(
                     paste,
                     identity,
                     file_policy,
+                    peer_directory,
                     auto_paste_files,
                     cache_dir,
                 )
@@ -1143,6 +1164,7 @@ async fn apply_pending_file_clip(
     paste: &PasteSimulator,
     identity: &DeviceIdentity,
     file_policy: &FileTransferPolicy,
+    peer_directory: &PeerDirectory,
     paste_after_apply: bool,
     cache_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
@@ -1158,6 +1180,7 @@ async fn apply_pending_file_clip(
         &pending,
         identity,
         file_policy,
+        peer_directory,
         cache_dir,
     )
     .await?;
@@ -1178,6 +1201,7 @@ async fn apply_latest_files_once(
     last_local_file_write: &Mutex<Option<String>>,
     identity: &DeviceIdentity,
     file_policy: &FileTransferPolicy,
+    peer_directory: &PeerDirectory,
     cache_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let Some(clip) = client.latest_clip().await? else {
@@ -1206,6 +1230,7 @@ async fn apply_latest_files_once(
         &pending,
         identity,
         file_policy,
+        peer_directory,
         cache_dir,
     )
     .await
@@ -1219,12 +1244,20 @@ async fn apply_file_clip(
     pending: &PendingFileClip,
     identity: &DeviceIdentity,
     file_policy: &FileTransferPolicy,
+    peer_directory: &PeerDirectory,
     cache_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     validate_file_clip(&pending.file_clip, file_policy)?;
 
-    let downloaded_files =
-        download_remote_files(client, cache_dir, requester_device_id, identity, pending).await?;
+    let downloaded_files = download_remote_files(
+        client,
+        cache_dir,
+        requester_device_id,
+        identity,
+        peer_directory,
+        pending,
+    )
+    .await?;
     if downloaded_files.is_empty() {
         bail!("remote file clip did not contain downloadable files");
     }
@@ -1277,17 +1310,39 @@ fn validate_file_clip(
     Ok(())
 }
 
+/// Resolve where to download a peer's files from: prefer the mDNS-discovered LAN address of
+/// the source device, falling back to the `source_peer_url` advertised in the manifest.
+async fn resolve_peer_base_url(
+    peer_directory: &PeerDirectory,
+    pending: &PendingFileClip,
+) -> anyhow::Result<String> {
+    if let Some(addr) = peer_directory.resolve(&pending.source_device_id).await {
+        tracing::info!(
+            source_device_id = %pending.source_device_id,
+            %addr,
+            "resolved source peer via mDNS"
+        );
+        return Ok(format!("http://{addr}"));
+    }
+    match &pending.file_clip.source_peer_url {
+        Some(url) => Ok(url.trim_end_matches('/').to_string()),
+        None => bail!(
+            "source peer {} was not found via mDNS and the manifest has no source_peer_url",
+            pending.source_device_id
+        ),
+    }
+}
+
 async fn download_remote_files(
     client: &ServerClient,
     cache_dir: &Path,
     requester_device_id: &DeviceId,
     identity: &DeviceIdentity,
+    peer_directory: &PeerDirectory,
     pending: &PendingFileClip,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let file_clip = &pending.file_clip;
-    let Some(source_peer_url) = &file_clip.source_peer_url else {
-        bail!("remote file clip has no source_peer_url");
-    };
+    let peer_base_url = resolve_peer_base_url(peer_directory, pending).await?;
 
     let clip_cache_dir = cache_dir.join(file_clip.transfer_token.as_str());
     tokio::fs::create_dir_all(&clip_cache_dir).await?;
@@ -1304,7 +1359,7 @@ async fn download_remote_files(
 
         let url = format!(
             "{}/v1/files/{}/{}",
-            source_peer_url.trim_end_matches('/'),
+            peer_base_url.trim_end_matches('/'),
             file_clip.transfer_token.as_str(),
             index
         );

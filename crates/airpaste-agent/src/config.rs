@@ -75,7 +75,7 @@ pub struct Args {
     #[arg(long, env = "AIRPASTE_MAX_TEXT_CLIP_BYTES", default_value_t = 128 * 1024)]
     pub max_text_clip_bytes: usize,
 
-    #[arg(long, env = "AIRPASTE_PEER_BIND", default_value = "127.0.0.1:17390")]
+    #[arg(long, env = "AIRPASTE_PEER_BIND", default_value = "0.0.0.0:17390")]
     pub peer_bind: SocketAddr,
 
     #[arg(long, env = "AIRPASTE_PEER_PUBLIC_URL")]

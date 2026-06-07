@@ -148,7 +148,8 @@ The agent:
 - Gives text clips a default 600-second `expires_at`; use `--text-clip-ttl-secs 0` to publish non-expiring text clips for debugging.
 - Skips automatic text clipboard publish for obvious sensitive content by default: private keys, JWTs, bearer tokens, provider tokens (`ghp_`, `github_pat_`, `sk-`), secret-like assignments, one-time-code-like numbers, credit-card-like numbers, and text above `--max-text-clip-bytes`.
 - Publishes file clipboard manifests from Windows `CF_HDROP` and macOS file URLs.
-- Runs a peer HTTP server on `--peer-bind`, default `127.0.0.1:17390`.
+- Runs a peer HTTP server on `--peer-bind`, default `0.0.0.0:17390` (LAN-reachable; protected by signed one-time-token requests).
+- Advertises and browses `_airpaste._tcp.local.` over mDNS, keeping a `device_id -> LAN address` directory. On download it prefers the discovered address over the manifest `source_peer_url`, so `--peer-public-url` is usually unnecessary on a LAN. mDNS failures fall back to `source_peer_url`.
 - Receives remote file manifests and records them as pending by default.
 - Downloads pending files on `Ctrl+Shift+V`, writes downloaded cache paths to Windows file clipboard, then sends normal paste.
 - On macOS, downloads pending files on `Ctrl+Shift+V` and writes downloaded cache file URLs to the pasteboard. Synthetic `Cmd+V` paste is still intentionally out of scope.
@@ -274,8 +275,7 @@ Transfer:
 - Directories are represented in the manifest but skipped by transfer.
 - There is no recursive directory copy.
 - There is no resume, explicit chunk protocol, or transfer progress.
-- There is no mDNS/LAN discovery yet.
-- Relay session metadata exists, but the relay data path is not implemented.
+- Relay session metadata exists, but the relay data path is not implemented (the cross-network fallback when LAN discovery does not apply).
 
 Platform:
 
