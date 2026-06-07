@@ -56,6 +56,12 @@ struct PendingFileClip {
     file_clip: FileClip,
 }
 
+#[derive(Clone)]
+struct TextPublishPolicy {
+    filter_sensitive_text: bool,
+    max_text_clip_bytes: usize,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -78,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
     let auto_apply_files = args.auto_apply_files;
     let auto_paste_files = args.auto_paste_files;
     let text_clip_ttl_secs = args.text_clip_ttl_secs;
+    let text_publish_policy = TextPublishPolicy {
+        filter_sensitive_text: args.filter_sensitive_text,
+        max_text_clip_bytes: args.max_text_clip_bytes,
+    };
     let transfer_token_ttl_secs = args.transfer_token_ttl_secs.max(1);
     let file_policy = FileTransferPolicy {
         max_file_count: args.max_file_count,
@@ -219,6 +229,7 @@ async fn main() -> anyhow::Result<()> {
             peer_public_url,
             file_policy.clone(),
             text_clip_ttl_secs,
+            text_publish_policy,
             Duration::from_millis(args.poll_ms),
         ))
     } else {
@@ -299,6 +310,7 @@ async fn poll_clipboard(
     peer_public_url: String,
     file_policy: FileTransferPolicy,
     text_clip_ttl_secs: u64,
+    text_publish_policy: TextPublishPolicy,
     interval: Duration,
 ) -> anyhow::Result<()> {
     let mut last_seen = clipboard.get_text().unwrap_or_default();
@@ -357,6 +369,14 @@ async fn poll_clipboard(
         };
         last_seen = Some(text.clone());
         if ignored {
+            continue;
+        }
+        if let Some(reason) = text_publish_skip_reason(&text, &text_publish_policy) {
+            tracing::warn!(
+                reason,
+                byte_len = text.len(),
+                "skipped text clipboard publish"
+            );
             continue;
         }
 
@@ -504,6 +524,241 @@ fn text_clip_expires_at(ttl_secs: u64) -> Option<airpaste_core::Timestamp> {
         None
     } else {
         Some(airpaste_core::now() + ChronoDuration::seconds(ttl_secs.min(i64::MAX as u64) as i64))
+    }
+}
+
+fn text_publish_skip_reason(text: &str, policy: &TextPublishPolicy) -> Option<&'static str> {
+    if policy.max_text_clip_bytes > 0 && text.len() > policy.max_text_clip_bytes {
+        return Some("text too large");
+    }
+    if !policy.filter_sensitive_text {
+        return None;
+    }
+
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("-----begin ") && lower.contains("private key-----") {
+        return Some("private key");
+    }
+    if looks_like_jwt(trimmed) {
+        return Some("jwt");
+    }
+    if contains_bearer_token(trimmed) {
+        return Some("bearer token");
+    }
+    if contains_secret_assignment(trimmed) {
+        return Some("secret assignment");
+    }
+    if looks_like_one_time_code(trimmed) {
+        return Some("one-time code");
+    }
+    if contains_credit_card_like_number(trimmed) {
+        return Some("credit-card-like number");
+    }
+
+    None
+}
+
+fn looks_like_jwt(text: &str) -> bool {
+    let token = text.trim();
+    let mut parts = token.split('.');
+    let Some(header) = parts.next() else {
+        return false;
+    };
+    let Some(payload) = parts.next() else {
+        return false;
+    };
+    let Some(signature) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && header.len() >= 8
+        && payload.len() >= 8
+        && signature.len() >= 16
+        && [header, payload, signature]
+            .iter()
+            .all(|part| part.bytes().all(is_base64url_byte))
+}
+
+fn contains_bearer_token(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let Some(token) = word.strip_prefix("Bearer ") else {
+            return false;
+        };
+        token.len() >= 20 && token.bytes().all(is_token_byte)
+    }) || text
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| {
+            pair[0].eq_ignore_ascii_case("bearer")
+                && pair[1].len() >= 20
+                && pair[1].bytes().all(is_token_byte)
+        })
+}
+
+fn contains_secret_assignment(text: &str) -> bool {
+    const SECRET_KEYS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "access_key",
+        "access_token",
+        "auth_token",
+        "client_secret",
+        "password",
+        "passwd",
+        "private_key",
+        "secret",
+        "token",
+    ];
+
+    text.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+            return false;
+        }
+        let Some(separator_index) = line.find(['=', ':']) else {
+            return false;
+        };
+        let key = line[..separator_index]
+            .trim()
+            .trim_matches(['"', '\'', '`'])
+            .to_ascii_lowercase();
+        let value = line[separator_index + 1..]
+            .trim()
+            .trim_matches(['"', '\'', '`', ',', ';']);
+        value.len() >= 8
+            && SECRET_KEYS
+                .iter()
+                .any(|secret_key| key.contains(secret_key))
+    })
+}
+
+fn looks_like_one_time_code(text: &str) -> bool {
+    let code = text.trim();
+    (4..=8).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn contains_credit_card_like_number(text: &str) -> bool {
+    let mut digits = String::new();
+    for ch in text.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if ch == ' ' || ch == '-' {
+            continue;
+        }
+        if credit_card_digits_match(&digits) {
+            return true;
+        }
+        digits.clear();
+    }
+    credit_card_digits_match(&digits)
+}
+
+fn credit_card_digits_match(digits: &str) -> bool {
+    (13..=19).contains(&digits.len()) && luhn_valid(digits)
+}
+
+fn luhn_valid(digits: &str) -> bool {
+    let mut sum = 0u32;
+    let mut double = false;
+    for byte in digits.bytes().rev() {
+        let mut digit = (byte - b'0') as u32;
+        if double {
+            digit *= 2;
+            if digit > 9 {
+                digit -= 9;
+            }
+        }
+        sum += digit;
+        double = !double;
+    }
+    sum % 10 == 0
+}
+
+fn is_base64url_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~' | b'+' | b'/' | b'=')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_policy() -> TextPublishPolicy {
+        TextPublishPolicy {
+            filter_sensitive_text: true,
+            max_text_clip_bytes: 128 * 1024,
+        }
+    }
+
+    #[test]
+    fn skips_obvious_sensitive_text() {
+        let policy = default_policy();
+        assert_eq!(
+            text_publish_skip_reason(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+                &policy
+            ),
+            Some("private key")
+        );
+        assert_eq!(
+            text_publish_skip_reason(
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+                &policy
+            ),
+            Some("jwt")
+        );
+        assert_eq!(
+            text_publish_skip_reason("Authorization: Bearer abcdefghijklmnopqrstuvwx", &policy),
+            Some("bearer token")
+        );
+        assert_eq!(
+            text_publish_skip_reason("DATABASE_PASSWORD=correct-horse", &policy),
+            Some("secret assignment")
+        );
+        assert_eq!(
+            text_publish_skip_reason("123456", &policy),
+            Some("one-time code")
+        );
+        assert_eq!(
+            text_publish_skip_reason("4111 1111 1111 1111", &policy),
+            Some("credit-card-like number")
+        );
+    }
+
+    #[test]
+    fn allows_normal_clipboard_text() {
+        assert_eq!(
+            text_publish_skip_reason("airpaste publish smoke text", &default_policy()),
+            None
+        );
+    }
+
+    #[test]
+    fn sensitive_filter_can_be_disabled_without_disabling_size_guard() {
+        let policy = TextPublishPolicy {
+            filter_sensitive_text: false,
+            max_text_clip_bytes: 16,
+        };
+        assert_eq!(
+            text_publish_skip_reason("DATABASE_PASSWORD=correct-horse", &policy),
+            Some("text too large")
+        );
+
+        let policy = TextPublishPolicy {
+            filter_sensitive_text: false,
+            max_text_clip_bytes: 0,
+        };
+        assert_eq!(
+            text_publish_skip_reason("DATABASE_PASSWORD=correct-horse", &policy),
+            None
+        );
     }
 }
 

@@ -126,6 +126,13 @@ try {
     if (!$latest.expires_at) {
         throw "publish smoke failed: text clip did not include expires_at"
     }
+    $sensitiveText = "DATABASE_PASSWORD=airpaste-smoke-secret"
+    Set-Clipboard -Value $sensitiveText
+    Start-Sleep -Seconds 2
+    $latestAfterSensitive = Get-LatestClip
+    if ($latestAfterSensitive.kind.text.encrypted_inline_body -eq $sensitiveText) {
+        throw "sensitive text filter smoke failed: secret-like text was published"
+    }
 
     Write-Host "Apply path"
     $applierPair = New-PairCode
