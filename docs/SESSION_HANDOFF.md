@@ -29,6 +29,33 @@ The workspace currently contains:
 
 ## Toolchain Notes
 
+Development is now primary on macOS. The server and the macOS agent build, test, and
+run natively here. Windows-target code is compile-checked from macOS via cross-compile;
+running/behavior-testing the Windows agent (clipboard, hotkey, synthetic paste) still
+requires a real Windows session.
+
+### macOS Cross-Compile To Windows
+
+One-time setup:
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+brew install mingw-w64
+```
+
+Then compile-check or build the Windows target from macOS:
+
+```bash
+scripts/cross-windows.sh            # cargo check (fast)
+scripts/cross-windows.sh build      # full build + link -> target/x86_64-pc-windows-gnu/debug/*.exe
+```
+
+The script sets `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc` so it
+overrides the repo `.cargo/config.toml` (which hardcodes a Windows-only `.exe` linker path
+the Windows host needs). The repo config is intentionally left untouched.
+
+### Windows Host (compile/run only)
+
 This Windows machine does not have the MSVC linker installed. Use the GNU Rust toolchain plus the portable WinLibs toolchain under `tools/winlibs`.
 
 Use this PATH before Cargo commands:
