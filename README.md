@@ -30,6 +30,7 @@ The repository currently includes a runnable Rust control-plane server:
 
 - `crates/airpaste-core`: shared domain types.
 - `crates/airpaste-protocol`: REST and WebSocket DTOs.
+- `crates/airpaste-crypto`: end-to-end content encryption (X25519 + XChaCha20-Poly1305).
 - `crates/airpaste-server`: Axum server with embedded `redb` storage.
 - `crates/airpaste-agent`: Windows agent MVP for text sync and file manifest publishing.
 
@@ -77,6 +78,7 @@ To join a non-first device, create a pairing code through `POST /v1/pair/start` 
 
 Current agent scope:
 
+- Text clips are end-to-end encrypted. The agent generates an X25519 key alongside its Ed25519 identity, registers the public key, and seals each clip's content with a random per-clip key wrapped for every trusted device. The server only stores ciphertext, ephemeral public keys, and nonces. Legacy plaintext clips are still applied on read with a warning. Devices registered before this feature re-register automatically to advertise their encryption key.
 - Windows text clipboard publish/apply.
 - Windows file clipboard manifest publish via `CF_HDROP`.
 - MVP file payload download from source agent peer HTTP service into receiver cache.

@@ -74,6 +74,9 @@ pub struct HealthResponse {
 pub struct RegisterDeviceRequest {
     pub name: String,
     pub public_key: String,
+    /// Base64 X25519 public key for end-to-end content encryption.
+    #[serde(default)]
+    pub encryption_public_key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

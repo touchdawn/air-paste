@@ -101,8 +101,13 @@ impl ServerClient {
         &self,
         name: String,
         public_key: String,
+        encryption_public_key: String,
     ) -> anyhow::Result<Device> {
-        let request = RegisterDeviceRequest { name, public_key };
+        let request = RegisterDeviceRequest {
+            name,
+            public_key,
+            encryption_public_key,
+        };
         let response = self
             .authorized(self.http.post(format!("{}/v1/devices", self.base_url)))
             .json(&request)

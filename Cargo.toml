@@ -2,6 +2,7 @@
 members = [
     "crates/airpaste-core",
     "crates/airpaste-protocol",
+    "crates/airpaste-crypto",
     "crates/airpaste-agent",
     "crates/airpaste-server",
 ]
@@ -21,7 +22,9 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 core-foundation-sys = "0.8"
 base64 = "0.22"
+chacha20poly1305 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+hkdf = "0.12"
 futures-util = "0.3"
 rand_core = { version = "0.6", features = ["getrandom"] }
 redb = "2"
@@ -39,3 +42,4 @@ ulid = { version = "1", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-tungstenite = "0.24"
 windows-sys = "0.61"
+x25519-dalek = { version = "2", features = ["static_secrets"] }

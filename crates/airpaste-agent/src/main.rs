@@ -21,7 +21,8 @@ use airpaste_core::{
     BlobRef, ClipId, ClipKind, DeviceId, EncryptionInfo, FileClip, FileEntry, FileEntryKind,
     TextClip, TransferToken,
 };
-use airpaste_protocol::{CreateRelaySessionRequest, ServerEvent};
+use airpaste_crypto::EncryptionIdentity;
+use airpaste_protocol::{CreateClipResponse, CreateRelaySessionRequest, ServerEvent};
 use anyhow::{bail, Context};
 use chrono::Duration as ChronoDuration;
 use clap::Parser;
@@ -79,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let state_file = StateFile::new(state_path);
     let mut state = state_file.load()?;
     let identity = Arc::new(ensure_identity(&state_file, &mut state)?);
+    let encryption = Arc::new(ensure_encryption_identity(&state_file, &mut state)?);
     let auth_token = args.auth_token.clone().filter(|token| !token.is_empty());
     let client = ServerClient::new(args.server_url.clone(), auth_token)?;
     let auto_apply_files = args.auto_apply_files;
@@ -103,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         &mut state,
         &device_name,
         identity.public_key_base64(),
+        encryption.public_key_base64(),
     )
     .await?;
     client
@@ -161,25 +164,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(text) = args.publish_text_once.clone() {
-        let utf8_len = text.len() as u64;
-        let response = client
-            .create_clip(
-                device_id.clone(),
-                ClipKind::Text(TextClip {
-                    utf8_len,
-                    preview: None,
-                    encrypted_body_ref: BlobRef {
-                        id: format!("inline:{utf8_len}"),
-                        byte_len: utf8_len,
-                    },
-                    encrypted_inline_body: Some(text),
-                }),
-                EncryptionInfo {
-                    scheme: "mvp-inline-placeholder".to_string(),
-                    key_wrapped_for: vec![device_id.clone()],
-                },
-                text_clip_expires_at(text_clip_ttl_secs),
-            )
+        let response = publish_text_clip(&client, &device_id, text, text_clip_ttl_secs)
             .await
             .context("failed to publish text clip")?;
         println!("{}", serde_json::to_string(&response)?);
@@ -240,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         client,
         clipboard,
         device_id,
+        encryption,
         last_local_write,
         last_local_file_write,
         pending_file_clip,
@@ -280,19 +266,36 @@ fn ensure_identity(
     Ok(identity)
 }
 
+fn ensure_encryption_identity(
+    state_file: &StateFile,
+    state: &mut AgentState,
+) -> anyhow::Result<EncryptionIdentity> {
+    if let Some(private_key) = &state.device_encryption_private_key {
+        return Ok(EncryptionIdentity::from_private_key_base64(private_key)?);
+    }
+
+    let identity = EncryptionIdentity::generate();
+    state.device_encryption_private_key = Some(identity.private_key_base64());
+    // Force re-registration so the server learns this device's encryption public key.
+    state.device_id = None;
+    state_file.save(state)?;
+    Ok(identity)
+}
+
 async fn ensure_device(
     client: &ServerClient,
     state_file: &StateFile,
     state: &mut AgentState,
     name: &str,
     public_key: String,
+    encryption_public_key: String,
 ) -> anyhow::Result<DeviceId> {
     if let Some(device_id) = &state.device_id {
         return Ok(device_id.clone());
     }
 
     let device = client
-        .register_device(name.to_string(), public_key)
+        .register_device(name.to_string(), public_key, encryption_public_key)
         .await
         .context("failed to register device")?;
     state.device_id = Some(device.device_id.clone());
@@ -380,28 +383,109 @@ async fn poll_clipboard(
             continue;
         }
 
-        let utf8_len = text.len() as u64;
-        let clip = ClipKind::Text(TextClip {
-            utf8_len,
-            preview: None,
-            encrypted_body_ref: BlobRef {
-                id: format!("inline:{utf8_len}"),
-                byte_len: utf8_len,
+        match publish_text_clip(&client, &device_id, text, text_clip_ttl_secs).await {
+            Ok(response) => tracing::info!(clip_id = %response.clip_id, "published text clip"),
+            Err(error) => tracing::warn!(%error, "failed to publish text clip"),
+        }
+    }
+}
+
+/// Encrypt `text` for every trusted device (including ourselves) and publish it as a clip.
+///
+/// Sealing only needs the recipients' public keys, so the local encryption identity is
+/// not required here; the sender is included as a recipient via the trusted device list.
+async fn publish_text_clip(
+    client: &ServerClient,
+    device_id: &DeviceId,
+    text: String,
+    ttl_secs: u64,
+) -> anyhow::Result<CreateClipResponse> {
+    let recipients = trusted_encryption_recipients(client).await?;
+    if recipients.is_empty() {
+        bail!("no trusted device has an encryption public key; cannot encrypt text");
+    }
+
+    let sealed = airpaste_crypto::seal_text(&text, &recipients)
+        .map_err(|error| anyhow::anyhow!("failed to encrypt text clip: {error}"))?;
+    let key_wrapped_for = sealed
+        .wrapped_keys
+        .iter()
+        .map(|wrapped| wrapped.device_id.clone())
+        .collect();
+
+    let clip = ClipKind::Text(TextClip {
+        utf8_len: text.len() as u64,
+        preview: None,
+        encrypted_body_ref: BlobRef {
+            id: airpaste_crypto::TEXT_ENCRYPTION_SCHEME.to_string(),
+            byte_len: sealed.body_ciphertext_base64.len() as u64,
+        },
+        encrypted_inline_body: Some(sealed.body_ciphertext_base64),
+    });
+    client
+        .create_clip(
+            device_id.clone(),
+            clip,
+            EncryptionInfo {
+                scheme: airpaste_crypto::TEXT_ENCRYPTION_SCHEME.to_string(),
+                key_wrapped_for,
+                wrapped_keys: sealed.wrapped_keys,
+                body_nonce: Some(sealed.body_nonce_base64),
             },
-            encrypted_inline_body: Some(text),
-        });
-        let response = client
-            .create_clip(
-                device_id.clone(),
-                clip,
-                EncryptionInfo {
-                    scheme: "mvp-inline-placeholder".to_string(),
-                    key_wrapped_for: vec![device_id.clone()],
-                },
-                text_clip_expires_at(text_clip_ttl_secs),
-            )
-            .await?;
-        tracing::info!(clip_id = %response.clip_id, "published text clip");
+            text_clip_expires_at(ttl_secs),
+        )
+        .await
+}
+
+/// Trusted devices that advertise an X25519 encryption key, including ourselves.
+async fn trusted_encryption_recipients(
+    client: &ServerClient,
+) -> anyhow::Result<Vec<airpaste_crypto::Recipient>> {
+    Ok(client
+        .list_devices()
+        .await?
+        .into_iter()
+        .filter(|device| device.trusted && !device.encryption_public_key.trim().is_empty())
+        .map(|device| airpaste_crypto::Recipient {
+            device_id: device.device_id,
+            public_key_base64: device.encryption_public_key,
+        })
+        .collect())
+}
+
+/// Decrypt a remote text clip. Returns the plaintext, or `None` if there is nothing to apply.
+fn decrypt_remote_text(
+    text_clip: &TextClip,
+    encryption_info: &EncryptionInfo,
+    device_id: &DeviceId,
+    encryption: &EncryptionIdentity,
+) -> anyhow::Result<Option<String>> {
+    if encryption_info.scheme == airpaste_crypto::TEXT_ENCRYPTION_SCHEME {
+        let body = text_clip
+            .encrypted_inline_body
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("encrypted text clip is missing its body"))?;
+        let nonce = encryption_info
+            .body_nonce
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("encrypted text clip is missing its body nonce"))?;
+        let text = airpaste_crypto::open_text(
+            body,
+            nonce,
+            &encryption_info.wrapped_keys,
+            device_id,
+            encryption,
+        )
+        .map_err(|error| anyhow::anyhow!("failed to decrypt text clip: {error}"))?;
+        Ok(Some(text))
+    } else if let Some(text) = text_clip.encrypted_inline_body.as_ref() {
+        tracing::warn!(
+            scheme = %encryption_info.scheme,
+            "applying legacy plaintext text clip"
+        );
+        Ok(Some(text.clone()))
+    } else {
+        Ok(None)
     }
 }
 
@@ -504,6 +588,8 @@ async fn publish_file_manifest(
             EncryptionInfo {
                 scheme: "mvp-manifest-placeholder".to_string(),
                 key_wrapped_for: vec![device_id.clone()],
+                wrapped_keys: Vec::new(),
+                body_nonce: None,
             },
             None,
         )
@@ -826,6 +912,7 @@ async fn run_ws(
     client: ServerClient,
     clipboard: Arc<Clipboard>,
     device_id: DeviceId,
+    encryption: Arc<EncryptionIdentity>,
     last_local_write: Arc<Mutex<Option<String>>>,
     last_local_file_write: Arc<Mutex<Option<String>>>,
     pending_file_clip: Arc<Mutex<Option<PendingFileClip>>>,
@@ -883,6 +970,7 @@ async fn run_ws(
             &client,
             &clipboard,
             &device_id,
+            &encryption,
             &last_local_write,
             &last_local_file_write,
             &pending_file_clip,
@@ -907,6 +995,7 @@ async fn run_ws_once(
     client: &ServerClient,
     clipboard: &Clipboard,
     device_id: &DeviceId,
+    encryption: &EncryptionIdentity,
     last_local_write: &Mutex<Option<String>>,
     last_local_file_write: &Mutex<Option<String>>,
     pending_file_clip: &Mutex<Option<PendingFileClip>>,
@@ -938,6 +1027,7 @@ async fn run_ws_once(
             client,
             clipboard,
             device_id,
+            encryption,
             last_local_write,
             last_local_file_write,
             pending_file_clip,
@@ -959,6 +1049,7 @@ async fn handle_server_event(
     client: &ServerClient,
     clipboard: &Clipboard,
     device_id: &DeviceId,
+    encryption: &EncryptionIdentity,
     last_local_write: &Mutex<Option<String>>,
     last_local_file_write: &Mutex<Option<String>>,
     pending_file_clip: &Mutex<Option<PendingFileClip>>,
@@ -981,10 +1072,14 @@ async fn handle_server_event(
             let ClipKind::Text(text_clip) = clip.kind else {
                 return Ok(());
             };
-            if let Some(text) = text_clip.encrypted_inline_body {
-                clipboard.set_text(&text)?;
-                *last_local_write.lock().await = Some(text);
-                tracing::info!("applied remote text clip");
+            match decrypt_remote_text(&text_clip, &clip.encryption, device_id, encryption) {
+                Ok(Some(text)) => {
+                    clipboard.set_text(&text)?;
+                    *last_local_write.lock().await = Some(text);
+                    tracing::info!("applied remote text clip");
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "failed to apply remote text clip"),
             }
         }
         ServerEvent::ClipCreated {

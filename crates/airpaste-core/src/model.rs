@@ -6,6 +6,10 @@ pub struct Device {
     pub device_id: DeviceId,
     pub name: String,
     pub public_key: String,
+    /// Base64 X25519 public key used to wrap per-clip content keys for this device.
+    /// Empty for devices registered before end-to-end encryption was added.
+    #[serde(default)]
+    pub encryption_public_key: String,
     pub trusted: bool,
     pub created_at: Timestamp,
     pub last_seen_at: Option<Timestamp>,
@@ -63,6 +67,24 @@ impl ClipKind {
 pub struct EncryptionInfo {
     pub scheme: String,
     pub key_wrapped_for: Vec<DeviceId>,
+    /// Per-recipient wrapped content keys. Empty for legacy/plaintext schemes.
+    #[serde(default)]
+    pub wrapped_keys: Vec<WrappedKey>,
+    /// Base64 AEAD nonce for the inline encrypted body. None for legacy/plaintext schemes.
+    #[serde(default)]
+    pub body_nonce: Option<String>,
+}
+
+/// A per-clip content key sealed to a single recipient device via X25519 + AEAD.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WrappedKey {
+    pub device_id: DeviceId,
+    /// Base64 X25519 ephemeral public key used for this recipient.
+    pub ephemeral_public_key: String,
+    /// Base64 AEAD nonce for the wrapped content key.
+    pub nonce: String,
+    /// Base64 AEAD ciphertext of the content key.
+    pub ciphertext: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

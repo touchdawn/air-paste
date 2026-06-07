@@ -1,6 +1,6 @@
 # Air Paste Handoff
 
-Last updated: 2026-06-06
+Last updated: 2026-06-07
 
 This document is for the next coding session. It summarizes the current repo state, what is already working, what is intentionally still MVP-grade, and the recommended next steps.
 
@@ -24,8 +24,9 @@ The workspace currently contains:
 
 - `crates/airpaste-core`: shared IDs and domain models.
 - `crates/airpaste-protocol`: REST and WebSocket DTOs.
+- `crates/airpaste-crypto`: end-to-end content encryption (X25519 key agreement + XChaCha20-Poly1305 AEAD, per-clip content key wrapped per recipient).
 - `crates/airpaste-server`: Axum control-plane server using `redb`.
-- `crates/airpaste-agent`: Windows/macOS agent MVP with text sync, file manifest, peer file server, file download, remote paste hotkeys, and Ed25519 device identity.
+- `crates/airpaste-agent`: Windows/macOS agent MVP with end-to-end encrypted text sync, file manifest, peer file server, file download, remote paste hotkeys, Ed25519 device identity, and X25519 encryption identity.
 
 ## Toolchain Notes
 
@@ -134,15 +135,16 @@ Pairing/trust:
 Agent state file now stores:
 
 - `device_id`
-- `device_private_key`
+- `device_private_key` (Ed25519 signing key)
+- `device_encryption_private_key` (X25519 key-agreement key)
 
 The agent:
 
-- Generates an Ed25519 device identity on first run.
-- Registers the device public key with the server.
-- Reuses the saved private key on later runs.
+- Generates an Ed25519 signing identity and an X25519 encryption identity on first run.
+- Registers both the signing public key and the encryption public key with the server.
+- Reuses the saved private keys on later runs. A device that predates encryption keys re-registers automatically (state `device_id` is cleared) so the server learns its encryption public key.
 - Can confirm pairing with `--pair-code <code>`.
-- Publishes and applies text clipboard clips.
+- Publishes text clips end-to-end encrypted: a random per-clip content key encrypts the body (XChaCha20-Poly1305), and the content key is wrapped per trusted device via X25519. Applies remote text clips by unwrapping with its own X25519 key. Legacy plaintext clips are still applied with a warning.
 - Gives text clips a default 600-second `expires_at`; use `--text-clip-ttl-secs 0` to publish non-expiring text clips for debugging.
 - Skips automatic text clipboard publish for obvious sensitive content by default: private keys, JWTs, bearer tokens, provider tokens (`ghp_`, `github_pat_`, `sk-`), secret-like assignments, one-time-code-like numbers, credit-card-like numbers, and text above `--max-text-clip-bytes`.
 - Publishes file clipboard manifests from Windows `CF_HDROP` and macOS file URLs.
@@ -227,7 +229,8 @@ Smoke coverage:
 - File manifest and downloaded file SHA-256 verification.
 - Local file clipboard write.
 - Server auth token path.
-- macOS scripted text sync.
+- macOS scripted text sync (end-to-end encrypted publish on one device, decrypt + pasteboard apply on a paired device).
+- `airpaste-crypto` unit tests: encrypt/decrypt round-trip, persisted-identity decrypt, and that a non-recipient device cannot decrypt.
 - macOS scripted file URL publish, signed peer download, file URL pasteboard apply through `--apply-latest-files-once`.
 - macOS scripted server auth token path.
 - macOS interactive `Ctrl+Shift+V` hotkey harness exists as `scripts/smoke-hotkey-macos.sh`.
@@ -240,8 +243,10 @@ Smoke coverage:
 
 Security and trust:
 
-- Text clips are still inline plaintext placeholders, not real end-to-end encrypted payloads.
-- The server can still store and return plaintext text clips.
+- Text clips are end-to-end encrypted (X25519 + XChaCha20-Poly1305, per-clip content key wrapped per trusted device); the server only sees ciphertext. File manifests and image clips are NOT encrypted yet.
+- The plaintext length of a text clip still leaks via `TextClip.utf8_len`.
+- Sender authenticity for clip content relies on the REST request signature, not an AEAD binding to the source device.
+- Legacy plaintext text clips are still accepted on read (back-compat) and applied with a warning.
 - REST signatures currently use an in-memory nonce cache, so replay protection resets when the server restarts.
 - There is no UI fingerprint comparison for device public keys.
 
@@ -262,21 +267,21 @@ Platform:
 
 ## Recommended Next Steps
 
-### 1. Make Text Less Dangerous
+### 1. Extend Encryption Beyond Text
 
-Current text sync is functionally useful but security-weak.
+Text clips are now end-to-end encrypted. Remaining gaps:
 
-Options:
-
-- Build on the current short text clip TTL with a stricter history gate.
-- Tighten local sensitive-text filters as real-world false positives/negatives appear.
-- Add real E2EE content encryption using trusted device public keys.
+- Encrypt file manifests and (later) image payloads with the same `airpaste-crypto` primitives.
+- Bind clip content to the source device (AEAD AAD or a signature over the ciphertext) so recipients can verify authorship, not just confidentiality.
+- Add a UI/CLI fingerprint comparison for device public keys before trusting them.
+- Consider hiding plaintext length (currently leaked via `TextClip.utf8_len`).
 
 ### 2. Improve File Data Plane
 
 Useful incremental improvements:
 
 - Add directory walking with file count and total-size caps.
+- Reuse the per-clip content-key + X25519 wrapping design for peer file payloads.
 
 ### 3. Continue macOS Agent
 

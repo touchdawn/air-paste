@@ -7,6 +7,8 @@ use std::{fs, path::PathBuf};
 pub struct AgentState {
     pub device_id: Option<DeviceId>,
     pub device_private_key: Option<String>,
+    #[serde(default)]
+    pub device_encryption_private_key: Option<String>,
 }
 
 #[derive(Clone, Debug)]

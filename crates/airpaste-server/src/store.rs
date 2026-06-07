@@ -57,12 +57,18 @@ impl Store {
         Ok(())
     }
 
-    pub fn register_device(&self, name: String, public_key: String) -> StoreResult<Device> {
+    pub fn register_device(
+        &self,
+        name: String,
+        public_key: String,
+        encryption_public_key: String,
+    ) -> StoreResult<Device> {
         let trusted = self.list::<Device>(DEVICES)?.is_empty();
         let device = Device {
             device_id: DeviceId::new(),
             name,
             public_key,
+            encryption_public_key,
             trusted,
             created_at: now(),
             last_seen_at: None,
