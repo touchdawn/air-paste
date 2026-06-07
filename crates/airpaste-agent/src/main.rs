@@ -345,45 +345,56 @@ async fn poll_clipboard(
     interval: Duration,
 ) -> anyhow::Result<()> {
     let mut last_seen = clipboard.get_text().unwrap_or_default();
-    let mut last_seen_files = clipboard_signature(&clipboard.get_files()?.unwrap_or_default());
+    let mut last_seen_files =
+        clipboard_signature(&clipboard.get_files().ok().flatten().unwrap_or_default());
     let mut ticker = tokio::time::interval(interval);
 
     loop {
         ticker.tick().await;
-        if let Some(files) = clipboard.get_files()? {
-            let signature = clipboard_signature(&files);
-            if !files.is_empty() && signature != last_seen_files {
-                let ignored = {
-                    let mut guard = last_local_file_write.lock().await;
-                    if guard.as_ref() == signature.as_ref() {
-                        *guard = None;
-                        true
-                    } else {
-                        false
+        // Transient local clipboard read failures are logged and skipped, never fatal.
+        match clipboard.get_files() {
+            Ok(Some(files)) => {
+                let signature = clipboard_signature(&files);
+                if !files.is_empty() && signature != last_seen_files {
+                    let ignored = {
+                        let mut guard = last_local_file_write.lock().await;
+                        if guard.as_ref() == signature.as_ref() {
+                            *guard = None;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    last_seen_files = signature;
+                    if ignored {
+                        continue;
                     }
-                };
-                last_seen_files = signature;
-                if ignored {
+                    if let Err(error) = publish_file_manifest(
+                        &client,
+                        &device_id,
+                        &peer_registry,
+                        &peer_public_url,
+                        &file_policy,
+                        files,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "ignored file clipboard");
+                    }
                     continue;
                 }
-                if let Err(error) = publish_file_manifest(
-                    &client,
-                    &device_id,
-                    &peer_registry,
-                    &peer_public_url,
-                    &file_policy,
-                    files,
-                )
-                .await
-                {
-                    tracing::warn!(%error, "ignored file clipboard");
-                }
-                continue;
             }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "failed to read file clipboard"),
         }
 
-        let Some(text) = clipboard.get_text()? else {
-            continue;
+        let text = match clipboard.get_text() {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read text clipboard");
+                continue;
+            }
         };
         if text.is_empty() || Some(text.clone()) == last_seen {
             continue;
@@ -1334,19 +1345,10 @@ async fn apply_file_clip(
             source_device_id = %pending.source_device_id,
             "pulling remote files through the encrypted relay"
         );
-        relay::download_via_relay(
-            client,
-            identity,
-            encryption,
-            requester_device_id,
-            &pending.clip_id,
-            &pending.source_device_id,
-            &pending.file_clip,
-            cache_dir,
-        )
-        .await?
+        download_via_relay_for(client, identity, encryption, requester_device_id, pending, cache_dir)
+            .await?
     } else {
-        download_remote_files(
+        match download_remote_files(
             client,
             cache_dir,
             requester_device_id,
@@ -1354,7 +1356,30 @@ async fn apply_file_clip(
             peer_directory,
             pending,
         )
-        .await?
+        .await
+        {
+            Ok(files) => files,
+            Err(direct_error) => {
+                // Direct/LAN transfer failed (commonly: the source peer port is not
+                // reachable, so nothing was served and the one-time grants are intact).
+                // Fall back to the server-mediated encrypted relay.
+                tracing::warn!(
+                    %direct_error,
+                    source_device_id = %pending.source_device_id,
+                    "direct file download failed; falling back to encrypted relay"
+                );
+                download_via_relay_for(
+                    client,
+                    identity,
+                    encryption,
+                    requester_device_id,
+                    pending,
+                    cache_dir,
+                )
+                .await
+                .context("relay fallback after direct download failure also failed")?
+            }
+        }
     };
     if downloaded_files.is_empty() {
         bail!("remote file clip did not contain downloadable files");
@@ -1406,6 +1431,28 @@ fn validate_file_clip(
         }
     }
     Ok(())
+}
+
+/// Pull a pending file clip's files through the server-mediated encrypted relay.
+async fn download_via_relay_for(
+    client: &ServerClient,
+    identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
+    requester_device_id: &DeviceId,
+    pending: &PendingFileClip,
+    cache_dir: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    relay::download_via_relay(
+        client,
+        identity,
+        encryption,
+        requester_device_id,
+        &pending.clip_id,
+        &pending.source_device_id,
+        &pending.file_clip,
+        cache_dir,
+    )
+    .await
 }
 
 /// Resolve where to download a peer's files from: prefer the mDNS-discovered LAN address of

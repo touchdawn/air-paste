@@ -155,7 +155,8 @@ The agent:
 - Downloads pending files on `Ctrl+Shift+V`, writes downloaded cache paths to Windows file clipboard, then sends normal paste.
 - On macOS, downloads pending files on `Ctrl+Shift+V` and writes downloaded cache file URLs to the pasteboard. Synthetic `Cmd+V` paste is still intentionally out of scope.
 - Supports `--apply-latest-files-once` to fetch the latest remote file clip, download its files, write them to the local clipboard/pasteboard, print downloaded paths as JSON, and exit.
-- Pulls remote files through the server-mediated encrypted relay when started with `--prefer-relay`. The recipient creates a relay session; the server pushes `TransferRelayReady` to both devices; both connect to `GET /v1/relay/{session_id}/ws`; the source serves files claimed from its `PeerFileRegistry` (same signed peer-file authorization as the direct path), sealing each file for the recipient with `airpaste-crypto::seal_bytes`; the server only forwards opaque frames. Direct/LAN transfer is still the default.
+- Pulls remote files through the server-mediated encrypted relay, either automatically when a direct/LAN download fails or always when started with `--prefer-relay`. The recipient creates a relay session; the server pushes `TransferRelayReady` to both devices; both connect to `GET /v1/relay/{session_id}/ws`; the source serves files claimed from its `PeerFileRegistry` (same signed peer-file authorization as the direct path), sealing each file for the recipient with `airpaste-crypto::seal_bytes`; the server only forwards opaque frames. Direct/LAN transfer is still tried first by default.
+- `poll_clipboard` logs and skips transient local clipboard read failures instead of exiting, so a momentary OS clipboard error does not kill the agent.
 - Reconnects the control websocket with exponential backoff (2s up to 30s) and a 10s connect timeout, so a network drop or change does not busy-reconnect or hang. Relay connects also time out (10s); relay receives time out (recipient 30s, source idle 60s).
 - Uses macOS defaults `~/Library/Application Support/AirPaste/agent.json` for state and `~/Library/Caches/AirPaste` for cache when paths are not explicitly provided.
 
@@ -279,7 +280,7 @@ Transfer:
 - Directories are represented in the manifest but skipped by transfer.
 - There is no recursive directory copy.
 - There is no resume, explicit chunk protocol, or transfer progress.
-- The relay data path is implemented (E2EE, server-forwarded), but is only used when the receiver sets `--prefer-relay`. There is no automatic fall back from a failed direct/LAN download to relay yet (blocked by the one-time-per-index grant: indexes served directly cannot be re-pulled over relay without a grant-semantics change).
+- The relay data path is implemented (E2EE, server-forwarded). The receiver falls back to relay automatically when a direct/LAN download errors, and `--prefer-relay` forces it. Caveat: the automatic fallback re-pulls the whole transfer, so it only recovers cleanly when the direct attempt consumed no one-time grants (the dominant "source peer unreachable" case, where the first request fails at connect). A direct failure that occurs after the source already served some indexes will fail the relay retry with `410 already served`; the user re-copies.
 - The server relay forwards frames in memory with an unbounded per-direction queue; it enforces the session byte budget and TTL-at-connect, but does not cap in-flight buffering or enforce TTL mid-connection (the recipient's 30s receive timeout and source's 60s idle timeout bound stalls instead).
 
 Platform:
