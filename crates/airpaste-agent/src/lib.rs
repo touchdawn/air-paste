@@ -1,0 +1,1988 @@
+mod client;
+mod clipboard;
+mod config;
+mod discovery;
+mod hotkey;
+mod identity;
+mod paste;
+mod peer;
+mod relay;
+mod state_file;
+
+use crate::{
+    client::ServerClient,
+    clipboard::Clipboard,
+    discovery::PeerDirectory,
+    hotkey::{spawn_hotkey_listener, HotkeyAction, REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY},
+    identity::DeviceIdentity,
+    paste::PasteSimulator,
+    peer::{run_peer_server, PeerFileRegistry},
+    state_file::{AgentState, StateFile},
+};
+pub use crate::config::{Args, ClipboardMode};
+use airpaste_core::{
+    BlobRef, ClipId, ClipKind, DeviceId, EncryptionInfo, FileClip, FileEntry, FileEntryKind,
+    TextClip, TransferToken,
+};
+use airpaste_crypto::EncryptionIdentity;
+use airpaste_protocol::{CreateClipResponse, CreateRelaySessionRequest, ServerEvent};
+use anyhow::{bail, Context};
+use chrono::Duration as ChronoDuration;
+use clap::Parser;
+use futures_util::{SinkExt, StreamExt};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{mpsc, Mutex},
+};
+use tokio_tungstenite::tungstenite::Message;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Timeout for establishing a websocket connection (control or relay) so a hung connect
+/// during a network change recovers quickly instead of blocking on the OS TCP timeout.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Base and max delay between control-websocket reconnect attempts (exponential backoff).
+const WS_RECONNECT_BASE: Duration = Duration::from_secs(2);
+const WS_RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+/// Isolated-mode timing for the synthetic paste dance: settle the clipboard after writing
+/// our text, paste, then let the target app consume it before restoring the user's clipboard.
+const CLIPBOARD_SETTLE: Duration = Duration::from_millis(80);
+const PASTE_CONSUME: Duration = Duration::from_millis(150);
+/// Wait for the triggering hotkey's Ctrl+Shift to be released before synthesizing a chord, so
+/// the held modifiers do not combine with it (e.g. turning the synthetic Cmd+C into Ctrl+Cmd+C,
+/// which is not "copy"). The paste path already waits via CLIPBOARD_SETTLE after set_text.
+const HOTKEY_MODIFIER_RELEASE: Duration = Duration::from_millis(120);
+/// Polling for the result of a synthetic copy (the OS populates the clipboard async).
+const COPY_POLL_INTERVAL: Duration = Duration::from_millis(40);
+const COPY_POLL_ATTEMPTS: usize = 15;
+
+#[derive(Clone)]
+struct FileTransferPolicy {
+    max_file_count: usize,
+    max_total_file_bytes: u64,
+    max_single_file_bytes: u64,
+    transfer_token_ttl: Duration,
+    transfer_token_ttl_secs: u64,
+}
+
+#[derive(Clone)]
+struct PendingFileClip {
+    clip_id: ClipId,
+    source_device_id: DeviceId,
+    file_clip: FileClip,
+}
+
+#[derive(Clone)]
+struct TextPublishPolicy {
+    filter_sensitive_text: bool,
+    max_text_clip_bytes: usize,
+}
+
+/// Clipboard integration mode plus the isolated-mode inbox (latest remote text held in-app
+/// instead of being written to the system clipboard).
+#[derive(Clone)]
+struct ClipboardCtx {
+    mode: ClipboardMode,
+    inbox: Arc<Mutex<Option<String>>>,
+}
+
+impl ClipboardCtx {
+    fn is_isolated(&self) -> bool {
+        self.mode == ClipboardMode::Isolated
+    }
+}
+
+/// Shared, observable agent state for embedders (the tray UI). Updated by the running agent.
+pub struct AgentShared {
+    inbox: Arc<Mutex<Option<String>>>,
+    connected: AtomicBool,
+    device_name: std::sync::Mutex<String>,
+    device_id: std::sync::Mutex<Option<String>>,
+    isolated: bool,
+}
+
+impl AgentShared {
+    fn new(args: &Args) -> Self {
+        Self {
+            inbox: Arc::new(Mutex::new(None)),
+            connected: AtomicBool::new(false),
+            device_name: std::sync::Mutex::new(args.device_name()),
+            device_id: std::sync::Mutex::new(None),
+            isolated: args.clipboard_mode == ClipboardMode::Isolated,
+        }
+    }
+}
+
+/// A handle the tray UI uses to observe the embedded agent.
+#[derive(Clone)]
+pub struct AgentHandle {
+    shared: Arc<AgentShared>,
+}
+
+impl AgentHandle {
+    /// Whether the control WebSocket is currently connected.
+    pub fn connected(&self) -> bool {
+        self.shared.connected.load(Ordering::Relaxed)
+    }
+
+    pub fn device_name(&self) -> String {
+        self.shared.device_name.lock().unwrap().clone()
+    }
+
+    pub fn device_id(&self) -> Option<String> {
+        self.shared.device_id.lock().unwrap().clone()
+    }
+
+    pub fn isolated(&self) -> bool {
+        self.shared.isolated
+    }
+
+    /// The latest remote text held in the isolated-mode inbox, if any.
+    pub fn latest_inbox(&self) -> Option<String> {
+        self.shared
+            .inbox
+            .try_lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+}
+
+/// Initialize tracing to stderr. Safe to call once per process; a second call is ignored.
+pub fn init_tracing() {
+    let _ = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "airpaste_agent=debug".into()),
+        )
+        // Log to stderr (unbuffered): keeps stdout for data output (e.g. --print-latest-clip
+        // JSON) and ensures a long-running agent's logs flush promptly when redirected to a
+        // file, which block-buffered stdout does not do on Windows.
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .try_init();
+}
+
+/// CLI entry point: initialize tracing, parse args, and run to completion.
+pub async fn run_cli() -> anyhow::Result<()> {
+    init_tracing();
+    let args = Args::parse();
+    let shared = Arc::new(AgentShared::new(&args));
+    run(args, shared).await
+}
+
+/// Start the agent in the background for an embedder (the tray UI), returning a handle to
+/// observe it. Tracing must already be initialized by the embedder. Must be called from
+/// within a Tokio runtime.
+pub fn spawn_embedded(args: Args) -> AgentHandle {
+    let shared = Arc::new(AgentShared::new(&args));
+    let handle = AgentHandle {
+        shared: shared.clone(),
+    };
+    tokio::spawn(async move {
+        if let Err(error) = run(args, shared).await {
+            tracing::error!(%error, "embedded agent stopped");
+        }
+    });
+    handle
+}
+
+async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
+    let state_path = args.state_path();
+    let device_name = args.device_name();
+    let cache_dir = args.cache_dir();
+    let state_file = StateFile::new(state_path);
+    let mut state = state_file.load()?;
+    let identity = Arc::new(ensure_identity(&state_file, &mut state)?);
+    let encryption = Arc::new(ensure_encryption_identity(&state_file, &mut state)?);
+    let auth_token = args.auth_token.clone().filter(|token| !token.is_empty());
+    let client = ServerClient::new(args.server_url.clone(), auth_token)?;
+    let auto_apply_files = args.auto_apply_files;
+    let auto_paste_files = args.auto_paste_files;
+    let text_clip_ttl_secs = args.text_clip_ttl_secs;
+    let text_publish_policy = TextPublishPolicy {
+        filter_sensitive_text: args.filter_sensitive_text,
+        max_text_clip_bytes: args.max_text_clip_bytes,
+    };
+    let transfer_token_ttl_secs = args.transfer_token_ttl_secs.max(1);
+    let file_policy = FileTransferPolicy {
+        max_file_count: args.max_file_count,
+        max_total_file_bytes: args.max_total_file_bytes,
+        max_single_file_bytes: args.max_single_file_bytes,
+        transfer_token_ttl: Duration::from_secs(transfer_token_ttl_secs),
+        transfer_token_ttl_secs,
+    };
+
+    let device_id = ensure_device(
+        &client,
+        &state_file,
+        &mut state,
+        &device_name,
+        identity.public_key_base64(),
+        encryption.public_key_base64(),
+    )
+    .await?;
+    *shared.device_id.lock().unwrap() = Some(device_id.as_str().to_string());
+    client
+        .set_request_identity(device_id.clone(), identity.clone())
+        .await;
+    if let Some(pair_code) = args
+        .pair_code
+        .clone()
+        .filter(|pair_code| !pair_code.trim().is_empty())
+    {
+        let device = client
+            .confirm_pairing(pair_code, device_id.clone())
+            .await
+            .context("failed to confirm pairing")?;
+        tracing::info!(trusted = device.trusted, "pairing confirmed");
+    }
+    if args.create_pair_code {
+        let response = client
+            .start_pairing(device_id.clone(), args.pair_ttl_seconds)
+            .await
+            .context("failed to start pairing")?;
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    if args.print_latest_clip {
+        let clip = client
+            .latest_clip()
+            .await
+            .context("failed to get latest clip")?;
+        println!("{}", serde_json::to_string(&clip)?);
+        return Ok(());
+    }
+    if args.apply_latest_files_once {
+        let clipboard = Clipboard::new();
+        let last_local_file_write = Mutex::new(None::<String>);
+        let downloaded_files = apply_latest_files_once(
+            &client,
+            &clipboard,
+            &device_id,
+            &last_local_file_write,
+            &identity,
+            &encryption,
+            &file_policy,
+            &PeerDirectory::default(),
+            args.prefer_relay,
+            &cache_dir,
+        )
+        .await
+        .context("failed to apply latest file clip")?;
+        println!("{}", serde_json::to_string(&downloaded_files)?);
+        return Ok(());
+    }
+    if args.replay_latest_clip_signature {
+        client
+            .replay_latest_clip_signature()
+            .await
+            .context("failed to verify latest clip replay rejection")?;
+        println!("{}", serde_json::json!({"replay_rejected": true}));
+        return Ok(());
+    }
+    if let Some(text) = args.publish_text_once.clone() {
+        let response = publish_text_clip(&client, &device_id, text, text_clip_ttl_secs)
+            .await
+            .context("failed to publish text clip")?;
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    if let Some(clip_id) = args.create_relay_for_clip.clone() {
+        let recipient_device_id = args
+            .relay_recipient_device_id
+            .clone()
+            .map(DeviceId::from)
+            .unwrap_or_else(|| device_id.clone());
+        let response = client
+            .create_relay_session(CreateRelaySessionRequest {
+                clip_id: ClipId::from(clip_id),
+                source_device_id: device_id.clone(),
+                recipient_device_id,
+                max_bytes: args.relay_max_bytes,
+                ttl_seconds: args.relay_ttl_seconds,
+            })
+            .await
+            .context("failed to create relay session")?;
+        println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    tracing::info!(%device_id, server = %args.server_url, "agent started");
+
+    let clipboard = Arc::new(Clipboard::new());
+    let paste = Arc::new(PasteSimulator::new());
+    let clip_ctx = ClipboardCtx {
+        mode: args.clipboard_mode,
+        inbox: shared.inbox.clone(),
+    };
+    if clip_ctx.is_isolated() {
+        tracing::info!("clipboard isolated mode: Ctrl+Shift+C pushes the selection, Ctrl+Shift+V pastes from AirPaste");
+        if !paste.accessibility_trusted() {
+            tracing::warn!(
+                "isolated mode needs Accessibility permission to synthesize copy/paste; \
+                 grant it in System Settings -> Privacy & Security -> Accessibility, then restart"
+            );
+        }
+    }
+    let last_local_write = Arc::new(Mutex::new(None::<String>));
+    let last_local_file_write = Arc::new(Mutex::new(None::<String>));
+    let pending_file_clip = Arc::new(Mutex::new(None::<PendingFileClip>));
+    let peer_registry = PeerFileRegistry::default();
+    let peer_public_url = args
+        .peer_public_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}", args.peer_bind));
+    let peer_task = tokio::spawn(run_peer_server(args.peer_bind, peer_registry.clone()));
+
+    let (_mdns_daemon, peer_directory) =
+        match discovery::start(&device_id, &device_name, args.peer_bind.port()) {
+            Ok((daemon, directory)) => (Some(daemon), directory),
+            Err(error) => {
+                tracing::warn!(%error, "mDNS discovery disabled; falling back to source_peer_url");
+                (None, PeerDirectory::default())
+            }
+        };
+
+    let ws_peer_registry = peer_registry.clone();
+    let prefer_relay = args.prefer_relay;
+
+    let poll_task = if args.publish_clipboard {
+        tokio::spawn(poll_clipboard(
+            client.clone(),
+            clipboard.clone(),
+            device_id.clone(),
+            last_local_write.clone(),
+            last_local_file_write.clone(),
+            peer_registry,
+            peer_public_url,
+            file_policy.clone(),
+            text_clip_ttl_secs,
+            text_publish_policy,
+            clip_ctx.clone(),
+            Duration::from_millis(args.poll_ms),
+        ))
+    } else {
+        tokio::spawn(std::future::pending())
+    };
+
+    let ws_task = tokio::spawn(run_ws(
+        client,
+        clipboard,
+        device_id,
+        encryption,
+        peer_directory,
+        ws_peer_registry,
+        last_local_write,
+        last_local_file_write,
+        pending_file_clip,
+        args.apply_remote,
+        prefer_relay,
+        paste,
+        identity,
+        args.remote_paste_hotkey,
+        file_policy,
+        auto_apply_files,
+        auto_paste_files,
+        clip_ctx,
+        text_clip_ttl_secs,
+        cache_dir,
+        shared.clone(),
+    ));
+
+    tokio::select! {
+        result = peer_task => result??,
+        result = poll_task => result??,
+        result = ws_task => result??,
+        _ = shutdown_signal() => {
+            tracing::info!("shutdown requested");
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_identity(
+    state_file: &StateFile,
+    state: &mut AgentState,
+) -> anyhow::Result<DeviceIdentity> {
+    if let Some(private_key) = &state.device_private_key {
+        return DeviceIdentity::from_private_key_base64(private_key);
+    }
+
+    let identity = DeviceIdentity::generate();
+    state.device_private_key = Some(identity.private_key_base64());
+    state.device_id = None;
+    state_file.save(state)?;
+    Ok(identity)
+}
+
+fn ensure_encryption_identity(
+    state_file: &StateFile,
+    state: &mut AgentState,
+) -> anyhow::Result<EncryptionIdentity> {
+    if let Some(private_key) = &state.device_encryption_private_key {
+        return Ok(EncryptionIdentity::from_private_key_base64(private_key)?);
+    }
+
+    let identity = EncryptionIdentity::generate();
+    state.device_encryption_private_key = Some(identity.private_key_base64());
+    // Force re-registration so the server learns this device's encryption public key.
+    state.device_id = None;
+    state_file.save(state)?;
+    Ok(identity)
+}
+
+async fn ensure_device(
+    client: &ServerClient,
+    state_file: &StateFile,
+    state: &mut AgentState,
+    name: &str,
+    public_key: String,
+    encryption_public_key: String,
+) -> anyhow::Result<DeviceId> {
+    if let Some(device_id) = &state.device_id {
+        return Ok(device_id.clone());
+    }
+
+    let device = client
+        .register_device(name.to_string(), public_key, encryption_public_key)
+        .await
+        .context("failed to register device")?;
+    state.device_id = Some(device.device_id.clone());
+    state_file.save(state)?;
+    Ok(device.device_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn poll_clipboard(
+    client: ServerClient,
+    clipboard: Arc<Clipboard>,
+    device_id: DeviceId,
+    last_local_write: Arc<Mutex<Option<String>>>,
+    last_local_file_write: Arc<Mutex<Option<String>>>,
+    peer_registry: PeerFileRegistry,
+    peer_public_url: String,
+    file_policy: FileTransferPolicy,
+    text_clip_ttl_secs: u64,
+    text_publish_policy: TextPublishPolicy,
+    clip_ctx: ClipboardCtx,
+    interval: Duration,
+) -> anyhow::Result<()> {
+    let mut last_seen = clipboard.get_text().unwrap_or_default();
+    let mut last_seen_files =
+        clipboard_signature(&clipboard.get_files().ok().flatten().unwrap_or_default());
+    let mut ticker = tokio::time::interval(interval);
+
+    loop {
+        ticker.tick().await;
+        // Transient local clipboard read failures are logged and skipped, never fatal.
+        match clipboard.get_files() {
+            Ok(Some(files)) => {
+                let signature = clipboard_signature(&files);
+                if !files.is_empty() && signature != last_seen_files {
+                    let ignored = {
+                        let mut guard = last_local_file_write.lock().await;
+                        if guard.as_ref() == signature.as_ref() {
+                            *guard = None;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    last_seen_files = signature;
+                    if ignored {
+                        continue;
+                    }
+                    if let Err(error) = publish_file_manifest(
+                        &client,
+                        &device_id,
+                        &peer_registry,
+                        &peer_public_url,
+                        &file_policy,
+                        files,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "ignored file clipboard");
+                    }
+                    continue;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "failed to read file clipboard"),
+        }
+
+        // In isolated mode, text is only published on demand via Ctrl+Shift+C, never by
+        // watching the system clipboard.
+        if clip_ctx.is_isolated() {
+            continue;
+        }
+
+        let text = match clipboard.get_text() {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read text clipboard");
+                continue;
+            }
+        };
+        if text.is_empty() || Some(text.clone()) == last_seen {
+            continue;
+        }
+
+        let ignored = {
+            let mut guard = last_local_write.lock().await;
+            if guard.as_ref() == Some(&text) {
+                *guard = None;
+                true
+            } else {
+                false
+            }
+        };
+        last_seen = Some(text.clone());
+        if ignored {
+            continue;
+        }
+        if let Some(reason) = text_publish_skip_reason(&text, &text_publish_policy) {
+            tracing::warn!(
+                reason,
+                byte_len = text.len(),
+                "skipped text clipboard publish"
+            );
+            continue;
+        }
+
+        match publish_text_clip(&client, &device_id, text, text_clip_ttl_secs).await {
+            Ok(response) => tracing::info!(clip_id = %response.clip_id, "published text clip"),
+            Err(error) => tracing::warn!(%error, "failed to publish text clip"),
+        }
+    }
+}
+
+/// Encrypt `text` for every trusted device (including ourselves) and publish it as a clip.
+///
+/// Sealing only needs the recipients' public keys, so the local encryption identity is
+/// not required here; the sender is included as a recipient via the trusted device list.
+async fn publish_text_clip(
+    client: &ServerClient,
+    device_id: &DeviceId,
+    text: String,
+    ttl_secs: u64,
+) -> anyhow::Result<CreateClipResponse> {
+    let recipients = trusted_encryption_recipients(client).await?;
+    if recipients.is_empty() {
+        bail!("no trusted device has an encryption public key; cannot encrypt text");
+    }
+
+    let sealed = airpaste_crypto::seal_text(&text, &recipients)
+        .map_err(|error| anyhow::anyhow!("failed to encrypt text clip: {error}"))?;
+    let key_wrapped_for = sealed
+        .wrapped_keys
+        .iter()
+        .map(|wrapped| wrapped.device_id.clone())
+        .collect();
+
+    let clip = ClipKind::Text(TextClip {
+        utf8_len: text.len() as u64,
+        preview: None,
+        encrypted_body_ref: BlobRef {
+            id: airpaste_crypto::TEXT_ENCRYPTION_SCHEME.to_string(),
+            byte_len: sealed.body_ciphertext_base64.len() as u64,
+        },
+        encrypted_inline_body: Some(sealed.body_ciphertext_base64),
+    });
+    client
+        .create_clip(
+            device_id.clone(),
+            clip,
+            EncryptionInfo {
+                scheme: airpaste_crypto::TEXT_ENCRYPTION_SCHEME.to_string(),
+                key_wrapped_for,
+                wrapped_keys: sealed.wrapped_keys,
+                body_nonce: Some(sealed.body_nonce_base64),
+            },
+            text_clip_expires_at(ttl_secs),
+        )
+        .await
+}
+
+/// Trusted devices that advertise an X25519 encryption key, including ourselves.
+async fn trusted_encryption_recipients(
+    client: &ServerClient,
+) -> anyhow::Result<Vec<airpaste_crypto::Recipient>> {
+    Ok(client
+        .list_devices()
+        .await?
+        .into_iter()
+        .filter(|device| device.trusted && !device.encryption_public_key.trim().is_empty())
+        .map(|device| airpaste_crypto::Recipient {
+            device_id: device.device_id,
+            public_key_base64: device.encryption_public_key,
+        })
+        .collect())
+}
+
+/// Decrypt a remote text clip. Returns the plaintext, or `None` if there is nothing to apply.
+fn decrypt_remote_text(
+    text_clip: &TextClip,
+    encryption_info: &EncryptionInfo,
+    device_id: &DeviceId,
+    encryption: &EncryptionIdentity,
+) -> anyhow::Result<Option<String>> {
+    if encryption_info.scheme == airpaste_crypto::TEXT_ENCRYPTION_SCHEME {
+        let body = text_clip
+            .encrypted_inline_body
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("encrypted text clip is missing its body"))?;
+        let nonce = encryption_info
+            .body_nonce
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("encrypted text clip is missing its body nonce"))?;
+        let text = airpaste_crypto::open_text(
+            body,
+            nonce,
+            &encryption_info.wrapped_keys,
+            device_id,
+            encryption,
+        )
+        .map_err(|error| anyhow::anyhow!("failed to decrypt text clip: {error}"))?;
+        Ok(Some(text))
+    } else if let Some(text) = text_clip.encrypted_inline_body.as_ref() {
+        tracing::warn!(
+            scheme = %encryption_info.scheme,
+            "applying legacy plaintext text clip"
+        );
+        Ok(Some(text.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn publish_file_manifest(
+    client: &ServerClient,
+    device_id: &DeviceId,
+    peer_registry: &PeerFileRegistry,
+    peer_public_url: &str,
+    file_policy: &FileTransferPolicy,
+    paths: Vec<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    if paths.len() > file_policy.max_file_count {
+        bail!(
+            "file clipboard contains {} items, above configured limit {}",
+            paths.len(),
+            file_policy.max_file_count
+        );
+    }
+
+    let mut files = Vec::with_capacity(paths.len());
+    let mut total_size = 0u64;
+    let transfer_token = TransferToken::new();
+
+    for path in &paths {
+        let metadata = std::fs::metadata(&path).ok();
+        let is_file = metadata.as_ref().is_some_and(|metadata| metadata.is_file());
+        let size = metadata
+            .as_ref()
+            .filter(|_| is_file)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if is_file && size > file_policy.max_single_file_bytes {
+            bail!(
+                "file {} is {} bytes, above configured single-file limit {}",
+                path.display(),
+                size,
+                file_policy.max_single_file_bytes
+            );
+        }
+        total_size = total_size.saturating_add(size);
+        if total_size > file_policy.max_total_file_bytes {
+            bail!(
+                "file clipboard is {} bytes, above configured limit {}",
+                total_size,
+                file_policy.max_total_file_bytes
+            );
+        }
+
+        let display_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unnamed")
+            .to_string();
+        let kind = if metadata.as_ref().is_some_and(|metadata| metadata.is_dir()) {
+            FileEntryKind::Directory
+        } else {
+            FileEntryKind::File
+        };
+        let sha256 = if is_file {
+            Some(
+                hash_file_sha256(path)
+                    .await
+                    .with_context(|| format!("failed to hash file {}", path.display()))?,
+            )
+        } else {
+            None
+        };
+
+        files.push(FileEntry {
+            relative_path: display_name.clone(),
+            display_name,
+            size,
+            modified_at: None,
+            sha256,
+            kind,
+        });
+    }
+
+    let transfer_expires_at = airpaste_core::now()
+        + ChronoDuration::seconds(file_policy.transfer_token_ttl_secs.min(i64::MAX as u64) as i64);
+    let file_count = files.len();
+    peer_registry.register(
+        &transfer_token,
+        None,
+        device_id.clone(),
+        trusted_device_public_keys(client).await?,
+        paths.clone(),
+        file_policy.transfer_token_ttl,
+    )?;
+    let response = client
+        .create_clip(
+            device_id.clone(),
+            ClipKind::Files(FileClip {
+                files,
+                total_size,
+                transfer_token: transfer_token.clone(),
+                source_peer_url: Some(peer_public_url.trim_end_matches('/').to_string()),
+                transfer_expires_at: Some(transfer_expires_at),
+            }),
+            EncryptionInfo {
+                scheme: "mvp-manifest-placeholder".to_string(),
+                key_wrapped_for: vec![device_id.clone()],
+                wrapped_keys: Vec::new(),
+                body_nonce: None,
+            },
+            None,
+        )
+        .await?;
+    tracing::info!(
+        clip_id = %response.clip_id,
+        file_count,
+        total_size,
+        "published file manifest"
+    );
+    peer_registry.bind_clip_id(&transfer_token, response.clip_id)?;
+
+    Ok(())
+}
+
+fn text_clip_expires_at(ttl_secs: u64) -> Option<airpaste_core::Timestamp> {
+    if ttl_secs == 0 {
+        None
+    } else {
+        Some(airpaste_core::now() + ChronoDuration::seconds(ttl_secs.min(i64::MAX as u64) as i64))
+    }
+}
+
+fn text_publish_skip_reason(text: &str, policy: &TextPublishPolicy) -> Option<&'static str> {
+    if policy.max_text_clip_bytes > 0 && text.len() > policy.max_text_clip_bytes {
+        return Some("text too large");
+    }
+    if !policy.filter_sensitive_text {
+        return None;
+    }
+
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("-----begin ") && lower.contains("private key-----") {
+        return Some("private key");
+    }
+    if looks_like_jwt(trimmed) {
+        return Some("jwt");
+    }
+    if contains_bearer_token(trimmed) {
+        return Some("bearer token");
+    }
+    if contains_provider_token(trimmed) {
+        return Some("provider token");
+    }
+    if contains_secret_assignment(trimmed) {
+        return Some("secret assignment");
+    }
+    if looks_like_one_time_code(trimmed) {
+        return Some("one-time code");
+    }
+    if contains_credit_card_like_number(trimmed) {
+        return Some("credit-card-like number");
+    }
+
+    None
+}
+
+fn looks_like_jwt(text: &str) -> bool {
+    let token = text.trim();
+    let mut parts = token.split('.');
+    let Some(header) = parts.next() else {
+        return false;
+    };
+    let Some(payload) = parts.next() else {
+        return false;
+    };
+    let Some(signature) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && header.len() >= 8
+        && payload.len() >= 8
+        && signature.len() >= 16
+        && [header, payload, signature]
+            .iter()
+            .all(|part| part.bytes().all(is_base64url_byte))
+}
+
+fn contains_bearer_token(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let Some(token) = word.strip_prefix("Bearer ") else {
+            return false;
+        };
+        token.len() >= 20 && token.bytes().all(is_token_byte)
+    }) || text
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| {
+            pair[0].eq_ignore_ascii_case("bearer")
+                && pair[1].len() >= 20
+                && pair[1].bytes().all(is_token_byte)
+        })
+}
+
+fn contains_provider_token(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let token = word.trim_matches(['"', '\'', '`', ',', ';']);
+        let lower = token.to_ascii_lowercase();
+        lower.starts_with("github_pat_")
+            || lower.starts_with("ghp_")
+            || (lower.starts_with("sk-") && token.len() >= 32)
+    })
+}
+
+fn contains_secret_assignment(text: &str) -> bool {
+    const SECRET_KEYS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "access_key",
+        "access_token",
+        "auth_token",
+        "client_secret",
+        "password",
+        "passwd",
+        "private_key",
+        "secret",
+        "token",
+    ];
+
+    text.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+            return false;
+        }
+        let Some(separator_index) = line.find(['=', ':']) else {
+            return false;
+        };
+        let key = line[..separator_index]
+            .trim()
+            .trim_matches(['"', '\'', '`'])
+            .to_ascii_lowercase();
+        let value = line[separator_index + 1..]
+            .trim()
+            .trim_matches(['"', '\'', '`', ',', ';']);
+        value.len() >= 8
+            && SECRET_KEYS
+                .iter()
+                .any(|secret_key| key.contains(secret_key))
+    })
+}
+
+fn looks_like_one_time_code(text: &str) -> bool {
+    let code = text.trim();
+    (4..=8).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn contains_credit_card_like_number(text: &str) -> bool {
+    let mut digits = String::new();
+    for ch in text.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if ch == ' ' || ch == '-' {
+            continue;
+        }
+        if credit_card_digits_match(&digits) {
+            return true;
+        }
+        digits.clear();
+    }
+    credit_card_digits_match(&digits)
+}
+
+fn credit_card_digits_match(digits: &str) -> bool {
+    (13..=19).contains(&digits.len()) && luhn_valid(digits)
+}
+
+fn luhn_valid(digits: &str) -> bool {
+    let mut sum = 0u32;
+    let mut double = false;
+    for byte in digits.bytes().rev() {
+        let mut digit = (byte - b'0') as u32;
+        if double {
+            digit *= 2;
+            if digit > 9 {
+                digit -= 9;
+            }
+        }
+        sum += digit;
+        double = !double;
+    }
+    sum % 10 == 0
+}
+
+fn is_base64url_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~' | b'+' | b'/' | b'=')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_policy() -> TextPublishPolicy {
+        TextPublishPolicy {
+            filter_sensitive_text: true,
+            max_text_clip_bytes: 128 * 1024,
+        }
+    }
+
+    #[test]
+    fn skips_obvious_sensitive_text() {
+        let policy = default_policy();
+        assert_eq!(
+            text_publish_skip_reason(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+                &policy
+            ),
+            Some("private key")
+        );
+        assert_eq!(
+            text_publish_skip_reason(
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+                &policy
+            ),
+            Some("jwt")
+        );
+        assert_eq!(
+            text_publish_skip_reason("Authorization: Bearer abcdefghijklmnopqrstuvwx", &policy),
+            Some("bearer token")
+        );
+        assert_eq!(
+            text_publish_skip_reason("DATABASE_PASSWORD=correct-horse", &policy),
+            Some("secret assignment")
+        );
+        assert_eq!(
+            text_publish_skip_reason("123456", &policy),
+            Some("one-time code")
+        );
+        assert_eq!(
+            text_publish_skip_reason("4111 1111 1111 1111", &policy),
+            Some("credit-card-like number")
+        );
+    }
+
+    #[test]
+    fn skips_provider_tokens() {
+        let policy = default_policy();
+        assert_eq!(
+            text_publish_skip_reason("ghp_0123456789abcdefghijklmnopqrstuvwx", &policy),
+            Some("provider token")
+        );
+        assert_eq!(
+            text_publish_skip_reason("github_pat_11ABCDEFG0abcdefghij_0123456789", &policy),
+            Some("provider token")
+        );
+        assert_eq!(
+            text_publish_skip_reason("sk-abcdefghijklmnopqrstuvwxyz0123456789", &policy),
+            Some("provider token")
+        );
+        // Short "sk-" words must not trip the provider-token filter.
+        assert_eq!(
+            text_publish_skip_reason("sk-123 is a ski resort code", &policy),
+            None
+        );
+    }
+
+    #[test]
+    fn allows_normal_clipboard_text() {
+        assert_eq!(
+            text_publish_skip_reason("airpaste publish smoke text", &default_policy()),
+            None
+        );
+    }
+
+    fn file_entry(name: &str, kind: FileEntryKind) -> FileEntry {
+        FileEntry {
+            relative_path: name.to_string(),
+            display_name: name.to_string(),
+            size: 1,
+            modified_at: None,
+            sha256: None,
+            kind,
+        }
+    }
+
+    fn file_clip_with(kinds: &[FileEntryKind]) -> FileClip {
+        FileClip {
+            files: kinds
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| file_entry(&format!("f{i}"), kind.clone()))
+                .collect(),
+            total_size: kinds.len() as u64,
+            transfer_token: TransferToken::from("tt-test".to_string()),
+            source_peer_url: None,
+            transfer_expires_at: None,
+        }
+    }
+
+    #[test]
+    fn missing_file_indexes_skips_directories_and_done() {
+        let clip = file_clip_with(&[
+            FileEntryKind::File,
+            FileEntryKind::Directory,
+            FileEntryKind::File,
+            FileEntryKind::File,
+        ]);
+
+        // Nothing downloaded yet: every regular file (0, 2, 3) is missing; the directory (1) is not.
+        let empty = BTreeMap::new();
+        assert_eq!(missing_file_indexes(&clip, &empty), vec![0, 2, 3]);
+
+        // Index 0 already delivered directly: only 2 and 3 remain for the relay fallback.
+        let mut partial = BTreeMap::new();
+        partial.insert(0usize, PathBuf::from("/cache/f0"));
+        assert_eq!(missing_file_indexes(&clip, &partial), vec![2, 3]);
+
+        // All regular files done: nothing left to pull, so the relay creates no session.
+        let mut done = partial;
+        done.insert(2usize, PathBuf::from("/cache/f2"));
+        done.insert(3usize, PathBuf::from("/cache/f3"));
+        assert!(missing_file_indexes(&clip, &done).is_empty());
+    }
+
+    #[test]
+    fn sensitive_filter_can_be_disabled_without_disabling_size_guard() {
+        let policy = TextPublishPolicy {
+            filter_sensitive_text: false,
+            max_text_clip_bytes: 16,
+        };
+        assert_eq!(
+            text_publish_skip_reason("DATABASE_PASSWORD=correct-horse", &policy),
+            Some("text too large")
+        );
+
+        let policy = TextPublishPolicy {
+            filter_sensitive_text: false,
+            max_text_clip_bytes: 0,
+        };
+        assert_eq!(
+            text_publish_skip_reason("DATABASE_PASSWORD=correct-horse", &policy),
+            None
+        );
+    }
+}
+
+async fn trusted_device_public_keys(
+    client: &ServerClient,
+) -> anyhow::Result<HashMap<DeviceId, String>> {
+    Ok(client
+        .list_devices()
+        .await?
+        .into_iter()
+        .filter(|device| device.trusted && !device.public_key.trim().is_empty())
+        .map(|device| (device.device_id, device.public_key))
+        .collect())
+}
+
+fn clipboard_signature(paths: &[std::path::PathBuf]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    Some(
+        paths
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_ws(
+    client: ServerClient,
+    clipboard: Arc<Clipboard>,
+    device_id: DeviceId,
+    encryption: Arc<EncryptionIdentity>,
+    peer_directory: PeerDirectory,
+    peer_registry: PeerFileRegistry,
+    last_local_write: Arc<Mutex<Option<String>>>,
+    last_local_file_write: Arc<Mutex<Option<String>>>,
+    pending_file_clip: Arc<Mutex<Option<PendingFileClip>>>,
+    apply_remote: bool,
+    prefer_relay: bool,
+    paste: Arc<PasteSimulator>,
+    identity: Arc<DeviceIdentity>,
+    remote_paste_hotkey: bool,
+    file_policy: FileTransferPolicy,
+    auto_apply_files: bool,
+    auto_paste_files: bool,
+    clip_ctx: ClipboardCtx,
+    text_clip_ttl_secs: u64,
+    cache_dir: PathBuf,
+    shared: Arc<AgentShared>,
+) -> anyhow::Result<()> {
+    let (hotkey_tx, mut hotkey_rx) = mpsc::unbounded_channel::<HotkeyAction>();
+    if remote_paste_hotkey && apply_remote {
+        match spawn_hotkey_listener(hotkey_tx, clip_ctx.is_isolated()) {
+            Ok(()) => {
+                let hotkey_client = client.clone();
+                let hotkey_clipboard = clipboard.clone();
+                let hotkey_device_id = device_id.clone();
+                let hotkey_last_local_file_write = last_local_file_write.clone();
+                let hotkey_pending_file_clip = pending_file_clip.clone();
+                let hotkey_paste = paste.clone();
+                let hotkey_identity = identity.clone();
+                let hotkey_encryption = encryption.clone();
+                let hotkey_file_policy = file_policy.clone();
+                let hotkey_peer_directory = peer_directory.clone();
+                let hotkey_cache_dir = cache_dir.clone();
+                let hotkey_clip_ctx = clip_ctx.clone();
+                let paste_after_hotkey = REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY;
+                tokio::spawn(async move {
+                    while let Some(action) = hotkey_rx.recv().await {
+                        let result = match action {
+                            HotkeyAction::CopyToAirPaste => copy_selection_to_airpaste(
+                                &hotkey_client,
+                                &hotkey_device_id,
+                                &hotkey_clipboard,
+                                &hotkey_paste,
+                                text_clip_ttl_secs,
+                            )
+                            .await
+                            .context("Ctrl+Shift+C failed"),
+                            HotkeyAction::PasteRemote => {
+                                paste_remote_via_hotkey(
+                                    &hotkey_clip_ctx,
+                                    &hotkey_clipboard,
+                                    &hotkey_paste,
+                                    &hotkey_client,
+                                    &hotkey_device_id,
+                                    &hotkey_last_local_file_write,
+                                    &hotkey_pending_file_clip,
+                                    &hotkey_identity,
+                                    &hotkey_encryption,
+                                    &hotkey_file_policy,
+                                    &hotkey_peer_directory,
+                                    prefer_relay,
+                                    paste_after_hotkey,
+                                    &hotkey_cache_dir,
+                                )
+                                .await
+                                .context("Ctrl+Shift+V failed")
+                            }
+                        };
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "hotkey action failed");
+                        }
+                    }
+                    tracing::warn!("hotkey listener channel closed");
+                });
+            }
+            Err(error) => tracing::warn!(%error, "hotkeys disabled"),
+        }
+    }
+
+    let mut backoff = WS_RECONNECT_BASE;
+    loop {
+        let outcome = run_ws_once(
+            &client,
+            &clipboard,
+            &device_id,
+            &encryption,
+            &peer_directory,
+            &peer_registry,
+            &last_local_write,
+            &last_local_file_write,
+            &pending_file_clip,
+            apply_remote,
+            prefer_relay,
+            &paste,
+            &identity,
+            &file_policy,
+            auto_apply_files,
+            auto_paste_files,
+            &clip_ctx,
+            &cache_dir,
+            &shared.connected,
+        )
+        .await;
+        shared.connected.store(false, Ordering::Relaxed);
+        match &outcome {
+            Ok(()) => tracing::warn!("websocket disconnected"),
+            Err(error) => tracing::warn!(%error, "websocket failed"),
+        }
+        // A clean session (we were connected) resets the backoff; repeated connect
+        // failures back off exponentially so a network outage does not busy-reconnect.
+        if outcome.is_ok() {
+            backoff = WS_RECONNECT_BASE;
+        }
+        tokio::time::sleep(backoff).await;
+        if outcome.is_err() {
+            backoff = (backoff * 2).min(WS_RECONNECT_MAX);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_ws_once(
+    client: &ServerClient,
+    clipboard: &Clipboard,
+    device_id: &DeviceId,
+    encryption: &EncryptionIdentity,
+    peer_directory: &PeerDirectory,
+    peer_registry: &PeerFileRegistry,
+    last_local_write: &Mutex<Option<String>>,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending_file_clip: &Mutex<Option<PendingFileClip>>,
+    apply_remote: bool,
+    prefer_relay: bool,
+    paste: &PasteSimulator,
+    identity: &DeviceIdentity,
+    file_policy: &FileTransferPolicy,
+    auto_apply_files: bool,
+    auto_paste_files: bool,
+    clip_ctx: &ClipboardCtx,
+    cache_dir: &Path,
+    connected: &AtomicBool,
+) -> anyhow::Result<()> {
+    let request = client.ws_request().await?;
+    let (ws, _) = tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
+        .await
+        .map_err(|_| anyhow::anyhow!("websocket connect timed out"))??;
+    let (mut writer, mut reader) = ws.split();
+    writer
+        .send(Message::Text(serde_json::to_string(
+            &airpaste_protocol::ClientEvent::Hello {
+                device_id: device_id.clone(),
+            },
+        )?))
+        .await?;
+    connected.store(true, Ordering::Relaxed);
+
+    while let Some(message) = reader.next().await {
+        let message = message?;
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let event: ServerEvent = serde_json::from_str(&text)?;
+        handle_server_event(
+            client,
+            clipboard,
+            device_id,
+            encryption,
+            peer_directory,
+            peer_registry,
+            last_local_write,
+            last_local_file_write,
+            pending_file_clip,
+            event,
+            apply_remote,
+            prefer_relay,
+            paste,
+            identity,
+            file_policy,
+            auto_apply_files,
+            auto_paste_files,
+            clip_ctx,
+            cache_dir,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_server_event(
+    client: &ServerClient,
+    clipboard: &Clipboard,
+    device_id: &DeviceId,
+    encryption: &EncryptionIdentity,
+    peer_directory: &PeerDirectory,
+    peer_registry: &PeerFileRegistry,
+    last_local_write: &Mutex<Option<String>>,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending_file_clip: &Mutex<Option<PendingFileClip>>,
+    event: ServerEvent,
+    apply_remote: bool,
+    prefer_relay: bool,
+    paste: &PasteSimulator,
+    identity: &DeviceIdentity,
+    file_policy: &FileTransferPolicy,
+    auto_apply_files: bool,
+    auto_paste_files: bool,
+    clip_ctx: &ClipboardCtx,
+    cache_dir: &Path,
+) -> anyhow::Result<()> {
+    match event {
+        ServerEvent::ClipCreated {
+            clip_id,
+            source_device_id,
+            kind,
+        } if apply_remote && source_device_id != *device_id && kind == "text" => {
+            let clip = client.get_clip(clip_id).await?;
+            let ClipKind::Text(text_clip) = clip.kind else {
+                return Ok(());
+            };
+            match decrypt_remote_text(&text_clip, &clip.encryption, device_id, encryption) {
+                Ok(Some(text)) => {
+                    if clip_ctx.is_isolated() {
+                        // Isolated mode: keep the text in the in-app inbox; the system
+                        // clipboard is left untouched until the user presses Ctrl+Shift+V.
+                        *clip_ctx.inbox.lock().await = Some(text);
+                        tracing::info!("stored remote text in isolated inbox");
+                    } else {
+                        clipboard.set_text(&text)?;
+                        *last_local_write.lock().await = Some(text);
+                        tracing::info!("applied remote text clip");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "failed to apply remote text clip"),
+            }
+        }
+        ServerEvent::ClipCreated {
+            clip_id,
+            source_device_id,
+            kind,
+        } if apply_remote && source_device_id != *device_id && kind == "files" => {
+            let clip = client.get_clip(clip_id).await?;
+            let pending_clip_id = clip.clip_id.clone();
+            let pending_source_device_id = clip.source_device_id.clone();
+            let ClipKind::Files(file_clip) = clip.kind else {
+                return Ok(());
+            };
+            tracing::info!(
+                source_device_id = %source_device_id,
+                file_count = file_clip.files.len(),
+                total_size = file_clip.total_size,
+                "remote file clipboard available"
+            );
+            *pending_file_clip.lock().await = Some(PendingFileClip {
+                clip_id: pending_clip_id,
+                source_device_id: pending_source_device_id,
+                file_clip,
+            });
+            if auto_apply_files {
+                apply_pending_file_clip(
+                    client,
+                    clipboard,
+                    device_id,
+                    last_local_file_write,
+                    pending_file_clip,
+                    paste,
+                    identity,
+                    encryption,
+                    file_policy,
+                    peer_directory,
+                    prefer_relay,
+                    auto_paste_files,
+                    cache_dir,
+                )
+                .await?;
+            }
+        }
+        ServerEvent::TransferRelayReady {
+            session_id,
+            source_device_id,
+            recipient_device_id,
+            ..
+        } if source_device_id == *device_id => {
+            // We are the source: connect to the relay and serve files to the recipient.
+            let serve_client = client.clone();
+            let serve_registry = peer_registry.clone();
+            tokio::spawn(async move {
+                if let Err(error) = relay::serve_relay_session(
+                    serve_client,
+                    serve_registry,
+                    session_id,
+                    recipient_device_id,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "relay source session failed");
+                }
+            });
+        }
+        ServerEvent::HelloAck { .. }
+        | ServerEvent::DeviceOnline { .. }
+        | ServerEvent::DeviceOffline { .. }
+        | ServerEvent::ClipCreated { .. }
+        | ServerEvent::TransferOffer { .. }
+        | ServerEvent::TransferAnswer { .. }
+        | ServerEvent::TransferCandidate { .. }
+        | ServerEvent::TransferCancelled { .. }
+        | ServerEvent::TransferRelayReady { .. } => {}
+        ServerEvent::Error { message } => tracing::warn!(%message, "server event error"),
+    }
+    Ok(())
+}
+
+/// Ctrl+Shift+V dispatch. In isolated mode, paste the inbox text (zero-touch) when present;
+/// otherwise fall back to the file-paste flow. In system mode, run the file-paste flow.
+#[allow(clippy::too_many_arguments)]
+async fn paste_remote_via_hotkey(
+    clip_ctx: &ClipboardCtx,
+    clipboard: &Clipboard,
+    paste: &PasteSimulator,
+    client: &ServerClient,
+    device_id: &DeviceId,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending_file_clip: &Mutex<Option<PendingFileClip>>,
+    identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
+    file_policy: &FileTransferPolicy,
+    peer_directory: &PeerDirectory,
+    prefer_relay: bool,
+    paste_after_apply: bool,
+    cache_dir: &Path,
+) -> anyhow::Result<()> {
+    if clip_ctx.is_isolated() && paste_inbox_text(&clip_ctx.inbox, clipboard, paste).await? {
+        return Ok(());
+    }
+    apply_pending_file_clip(
+        client,
+        clipboard,
+        device_id,
+        last_local_file_write,
+        pending_file_clip,
+        paste,
+        identity,
+        encryption,
+        file_policy,
+        peer_directory,
+        prefer_relay,
+        paste_after_apply,
+        cache_dir,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Paste the latest inbox text into the focused app without leaving it on the system
+/// clipboard: save the current clipboard, set ours, synthesize paste, then restore. Returns
+/// `false` (no-op) when the inbox is empty so the caller can fall back to files.
+async fn paste_inbox_text(
+    inbox: &Mutex<Option<String>>,
+    clipboard: &Clipboard,
+    paste: &PasteSimulator,
+) -> anyhow::Result<bool> {
+    let Some(text) = inbox.lock().await.clone() else {
+        return Ok(false);
+    };
+    let saved = clipboard.get_text().ok().flatten();
+    clipboard.set_text(&text)?;
+    tokio::time::sleep(CLIPBOARD_SETTLE).await;
+    paste.paste()?;
+    tokio::time::sleep(PASTE_CONSUME).await;
+    if let Some(previous) = saved {
+        let _ = clipboard.set_text(&previous);
+    }
+    tracing::info!("pasted AirPaste inbox text");
+    Ok(true)
+}
+
+/// Ctrl+Shift+C: synthesize a copy of the current selection, read it off the clipboard,
+/// restore the user's clipboard, and publish it to the AirPaste channel.
+async fn copy_selection_to_airpaste(
+    client: &ServerClient,
+    device_id: &DeviceId,
+    clipboard: &Clipboard,
+    paste: &PasteSimulator,
+    text_clip_ttl_secs: u64,
+) -> anyhow::Result<()> {
+    let saved = clipboard.get_text().ok().flatten();
+    // Let the triggering Ctrl+Shift release so the synthetic Cmd+C is a clean copy.
+    tokio::time::sleep(HOTKEY_MODIFIER_RELEASE).await;
+    paste.copy()?;
+    let selection = read_after_copy(clipboard, saved.as_deref()).await;
+    if let Some(previous) = &saved {
+        let _ = clipboard.set_text(previous);
+    }
+    let Some(text) = selection else {
+        tracing::warn!("Ctrl+Shift+C captured no text selection");
+        return Ok(());
+    };
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let response = publish_text_clip(client, device_id, text, text_clip_ttl_secs).await?;
+    tracing::info!(clip_id = %response.clip_id, "pushed selection to AirPaste");
+    Ok(())
+}
+
+/// Poll the clipboard briefly for the result of a synthetic copy, returning the captured
+/// text once it differs from `previous` (or whatever is present after the timeout).
+async fn read_after_copy(clipboard: &Clipboard, previous: Option<&str>) -> Option<String> {
+    for _ in 0..COPY_POLL_ATTEMPTS {
+        tokio::time::sleep(COPY_POLL_INTERVAL).await;
+        if let Ok(Some(text)) = clipboard.get_text() {
+            if !text.is_empty() && Some(text.as_str()) != previous {
+                return Some(text);
+            }
+        }
+    }
+    clipboard.get_text().ok().flatten()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_pending_file_clip(
+    client: &ServerClient,
+    clipboard: &Clipboard,
+    requester_device_id: &DeviceId,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending_file_clip: &Mutex<Option<PendingFileClip>>,
+    paste: &PasteSimulator,
+    identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
+    file_policy: &FileTransferPolicy,
+    peer_directory: &PeerDirectory,
+    prefer_relay: bool,
+    paste_after_apply: bool,
+    cache_dir: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let Some(pending) = pending_file_clip.lock().await.clone() else {
+        tracing::info!("remote paste requested with no pending file clip");
+        return Ok(Vec::new());
+    };
+    let downloaded_files = apply_file_clip(
+        client,
+        clipboard,
+        requester_device_id,
+        last_local_file_write,
+        &pending,
+        identity,
+        encryption,
+        file_policy,
+        peer_directory,
+        prefer_relay,
+        cache_dir,
+    )
+    .await?;
+    *pending_file_clip.lock().await = None;
+    if paste_after_apply {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        paste.paste()?;
+        tracing::info!("sent paste hotkey for downloaded files");
+    }
+
+    Ok(downloaded_files)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_latest_files_once(
+    client: &ServerClient,
+    clipboard: &Clipboard,
+    requester_device_id: &DeviceId,
+    last_local_file_write: &Mutex<Option<String>>,
+    identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
+    file_policy: &FileTransferPolicy,
+    peer_directory: &PeerDirectory,
+    prefer_relay: bool,
+    cache_dir: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let Some(clip) = client.latest_clip().await? else {
+        bail!("no latest clip is available");
+    };
+    if clip.source_device_id == *requester_device_id {
+        bail!("latest file clip was published by this device");
+    }
+
+    let clip_id = clip.clip_id.clone();
+    let source_device_id = clip.source_device_id.clone();
+    let ClipKind::Files(file_clip) = clip.kind else {
+        bail!("latest clip is not a file clip");
+    };
+
+    let pending = PendingFileClip {
+        clip_id,
+        source_device_id,
+        file_clip,
+    };
+    apply_file_clip(
+        client,
+        clipboard,
+        requester_device_id,
+        last_local_file_write,
+        &pending,
+        identity,
+        encryption,
+        file_policy,
+        peer_directory,
+        prefer_relay,
+        cache_dir,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_file_clip(
+    client: &ServerClient,
+    clipboard: &Clipboard,
+    requester_device_id: &DeviceId,
+    last_local_file_write: &Mutex<Option<String>>,
+    pending: &PendingFileClip,
+    identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
+    file_policy: &FileTransferPolicy,
+    peer_directory: &PeerDirectory,
+    prefer_relay: bool,
+    cache_dir: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    validate_file_clip(&pending.file_clip, file_policy)?;
+
+    // Indexes are filled in by whichever path delivers them. On a direct->relay fallback the
+    // map already holds the files fetched directly, so the relay only pulls the rest instead
+    // of re-pulling the whole transfer (which would hit `already served` for done indexes).
+    let mut downloaded: BTreeMap<usize, PathBuf> = BTreeMap::new();
+    if prefer_relay {
+        tracing::info!(
+            source_device_id = %pending.source_device_id,
+            "pulling remote files through the encrypted relay"
+        );
+        download_via_relay_for(
+            client,
+            identity,
+            encryption,
+            requester_device_id,
+            pending,
+            cache_dir,
+            &mut downloaded,
+        )
+        .await?;
+    } else if let Err(direct_error) = download_remote_files(
+        client,
+        cache_dir,
+        requester_device_id,
+        identity,
+        peer_directory,
+        pending,
+        &mut downloaded,
+    )
+    .await
+    {
+        // Direct/LAN transfer failed or stalled partway. Fall back to the server-mediated
+        // encrypted relay for whatever was not delivered directly.
+        tracing::warn!(
+            %direct_error,
+            source_device_id = %pending.source_device_id,
+            delivered_directly = downloaded.len(),
+            "direct file download failed; falling back to encrypted relay"
+        );
+        download_via_relay_for(
+            client,
+            identity,
+            encryption,
+            requester_device_id,
+            pending,
+            cache_dir,
+            &mut downloaded,
+        )
+        .await
+        .context("relay fallback after direct download failure also failed")?;
+    }
+
+    let downloaded_files: Vec<PathBuf> = downloaded.into_values().collect();
+    if downloaded_files.is_empty() {
+        bail!("remote file clip did not contain downloadable files");
+    }
+
+    clipboard.set_files(&downloaded_files)?;
+    *last_local_file_write.lock().await = clipboard_signature(&downloaded_files);
+    tracing::info!(
+        file_count = downloaded_files.len(),
+        "applied downloaded files to local clipboard"
+    );
+
+    Ok(downloaded_files)
+}
+
+fn validate_file_clip(
+    file_clip: &FileClip,
+    file_policy: &FileTransferPolicy,
+) -> anyhow::Result<()> {
+    if file_clip.files.len() > file_policy.max_file_count {
+        bail!(
+            "remote file clip contains {} items, above configured limit {}",
+            file_clip.files.len(),
+            file_policy.max_file_count
+        );
+    }
+    if file_clip.total_size > file_policy.max_total_file_bytes {
+        bail!(
+            "remote file clip is {} bytes, above configured limit {}",
+            file_clip.total_size,
+            file_policy.max_total_file_bytes
+        );
+    }
+    for entry in &file_clip.files {
+        if matches!(entry.kind, FileEntryKind::File)
+            && entry.size > file_policy.max_single_file_bytes
+        {
+            bail!(
+                "remote file {} is {} bytes, above configured single-file limit {}",
+                entry.relative_path,
+                entry.size,
+                file_policy.max_single_file_bytes
+            );
+        }
+    }
+    if let Some(expires_at) = &file_clip.transfer_expires_at {
+        if expires_at < &airpaste_core::now() {
+            bail!("remote file clip transfer token expired at {expires_at}");
+        }
+    }
+    Ok(())
+}
+
+/// Pull a pending file clip's still-missing files through the server-mediated encrypted relay.
+#[allow(clippy::too_many_arguments)]
+async fn download_via_relay_for(
+    client: &ServerClient,
+    identity: &DeviceIdentity,
+    encryption: &EncryptionIdentity,
+    requester_device_id: &DeviceId,
+    pending: &PendingFileClip,
+    cache_dir: &Path,
+    downloaded: &mut BTreeMap<usize, PathBuf>,
+) -> anyhow::Result<()> {
+    relay::download_via_relay(
+        client,
+        identity,
+        encryption,
+        requester_device_id,
+        &pending.clip_id,
+        &pending.source_device_id,
+        &pending.file_clip,
+        cache_dir,
+        downloaded,
+    )
+    .await
+}
+
+/// File indexes in a manifest that are regular files and not yet present in `downloaded`.
+fn missing_file_indexes(
+    file_clip: &FileClip,
+    downloaded: &BTreeMap<usize, PathBuf>,
+) -> Vec<usize> {
+    file_clip
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(index, entry)| {
+            matches!(entry.kind, FileEntryKind::File) && !downloaded.contains_key(index)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Resolve where to download a peer's files from: prefer the mDNS-discovered LAN address of
+/// the source device, falling back to the `source_peer_url` advertised in the manifest.
+async fn resolve_peer_base_url(
+    peer_directory: &PeerDirectory,
+    pending: &PendingFileClip,
+) -> anyhow::Result<String> {
+    if let Some(addr) = peer_directory.resolve(&pending.source_device_id).await {
+        tracing::info!(
+            source_device_id = %pending.source_device_id,
+            %addr,
+            "resolved source peer via mDNS"
+        );
+        return Ok(format!("http://{addr}"));
+    }
+    match &pending.file_clip.source_peer_url {
+        Some(url) => Ok(url.trim_end_matches('/').to_string()),
+        None => bail!(
+            "source peer {} was not found via mDNS and the manifest has no source_peer_url",
+            pending.source_device_id
+        ),
+    }
+}
+
+/// Download each still-missing regular file directly from the source peer, inserting
+/// successes into `downloaded`. Returns on the first failure with the partial progress
+/// preserved in `downloaded`, so the caller can fall back to the relay for the rest.
+#[allow(clippy::too_many_arguments)]
+async fn download_remote_files(
+    client: &ServerClient,
+    cache_dir: &Path,
+    requester_device_id: &DeviceId,
+    identity: &DeviceIdentity,
+    peer_directory: &PeerDirectory,
+    pending: &PendingFileClip,
+    downloaded: &mut BTreeMap<usize, PathBuf>,
+) -> anyhow::Result<()> {
+    let file_clip = &pending.file_clip;
+    let peer_base_url = resolve_peer_base_url(peer_directory, pending).await?;
+
+    let clip_cache_dir = cache_dir.join(file_clip.transfer_token.as_str());
+    tokio::fs::create_dir_all(&clip_cache_dir).await?;
+
+    for index in missing_file_indexes(file_clip, downloaded) {
+        let entry = &file_clip.files[index];
+        let url = format!(
+            "{}/v1/files/{}/{}",
+            peer_base_url.trim_end_matches('/'),
+            file_clip.transfer_token.as_str(),
+            index
+        );
+        let response = client
+            .open_peer_file_download(
+                &url,
+                &pending.clip_id,
+                &pending.source_device_id,
+                requester_device_id,
+                identity,
+            )
+            .await?;
+        let destination = safe_cache_path(&clip_cache_dir, &entry.display_name);
+        download_peer_file_to_cache(response, entry, &destination).await?;
+        tracing::info!(path = %destination.display(), "downloaded remote file");
+        downloaded.insert(index, destination);
+    }
+
+    Ok(())
+}
+
+async fn hash_file_sha256(path: &Path) -> anyhow::Result<String> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(hex_lower(&hasher.finalize()))
+}
+
+async fn download_peer_file_to_cache(
+    mut response: reqwest::Response,
+    entry: &FileEntry,
+    destination: &Path,
+) -> anyhow::Result<()> {
+    let temporary = destination.with_extension("airpaste-download");
+    let mut file = tokio::fs::File::create(&temporary).await?;
+    let mut hasher = Sha256::new();
+    let mut downloaded_size = 0u64;
+
+    let result = async {
+        while let Some(chunk) = response.chunk().await? {
+            downloaded_size = downloaded_size.saturating_add(chunk.len() as u64);
+            hasher.update(&chunk);
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        drop(file);
+
+        if downloaded_size != entry.size {
+            bail!(
+                "remote file size mismatch for {}: manifest declared {} bytes, downloaded {} bytes",
+                entry.relative_path,
+                entry.size,
+                downloaded_size
+            );
+        }
+
+        if let Some(expected_sha256) = &entry.sha256 {
+            let actual_sha256 = hex_lower(&hasher.finalize());
+            if !expected_sha256.eq_ignore_ascii_case(&actual_sha256) {
+                bail!(
+                    "remote file SHA-256 mismatch for {}: manifest declared {}, downloaded {}",
+                    entry.relative_path,
+                    expected_sha256,
+                    actual_sha256
+                );
+            }
+        } else {
+            tracing::warn!(
+                relative_path = %entry.relative_path,
+                "remote file manifest omitted SHA-256; verified size only"
+            );
+        }
+
+        tokio::fs::rename(&temporary, destination).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result
+}
+
+fn safe_cache_path(cache_dir: &Path, display_name: &str) -> PathBuf {
+    let sanitized = display_name
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '/' | '\\' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    let file_name = if sanitized.trim().is_empty() {
+        "download.bin"
+    } else {
+        sanitized.trim()
+    };
+    cache_dir.join(file_name)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(HEX[(byte >> 4) as usize] as char);
+        value.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    value
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install Ctrl+C handler");
+}
