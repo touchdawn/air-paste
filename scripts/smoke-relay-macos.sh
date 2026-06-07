@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure the agent emits the info-level lines this smoke greps for ("served relay file",
+# "downloaded remote file via relay"), regardless of any RUST_LOG already in the environment.
+export RUST_LOG="${AIRPASTE_SMOKE_RUST_LOG:-airpaste_agent=info}"
+
 bind="127.0.0.1:18085"
 auth_token=""
 

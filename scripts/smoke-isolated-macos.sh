@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure the agent emits the info-level lines this smoke greps for, regardless of any RUST_LOG
+# already in the environment (e.g. RUST_LOG=warn would hide "stored remote text in isolated inbox").
+export RUST_LOG="${AIRPASTE_SMOKE_RUST_LOG:-airpaste_agent=info}"
+
 bind="127.0.0.1:18086"
 auth_token=""
 

@@ -11,6 +11,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Ensure the agent emits the info-level lines this smoke greps for, regardless of any RUST_LOG
+# already in the environment (e.g. RUST_LOG=warn would hide "stored remote text in isolated inbox").
+if (-not $env:AIRPASTE_SMOKE_RUST_LOG) { $env:AIRPASTE_SMOKE_RUST_LOG = "airpaste_agent=info" }
+$env:RUST_LOG = $env:AIRPASTE_SMOKE_RUST_LOG
+
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $serverExe = Join-Path $root "target\debug\airpaste-server.exe"
 $agentExe = Join-Path $root "target\debug\airpaste-agent.exe"
