@@ -6,19 +6,31 @@ This document is for the next coding session. It summarizes the current repo sta
 
 ## Current Repository State
 
-Branch: `main`
+Branch: `main` (remote `origin` = Gitee `gitee.com:touch_dawn/air-paste`). Development is now
+primary on macOS; commit directly to `main`. A Windows machine is used to compile/run the
+Windows agent (reached over Remote Desktop). See "Toolchain Notes" for cross-compiling the
+Windows target from macOS.
 
-Recent commits:
+### What changed in the most recent session (2026-06-07)
 
-- `3b742f5 test: assert sha256 in macos smoke`
-- `ef66401 Merge remote-tracking branch 'origin/main' into codex/macos-agent`
-- `6350a59 feat: improve macos agent smoke and hotkey`
-- `711f77d feat: verify peer files with sha256`
-- `c2de004 feat: enforce single file transfer limits`
-- `16ac9af feat: verify peer file download sizes`
-- `81d693f feat: stream peer file downloads`
-- `935edaf Merge remote-tracking branch 'origin/main' into codex/macos-agent`
-- `fda0af2 feat: add macos agent clipboard and hotkey`
+Building on the existing Windows/macOS MVP (text sync, file manifest + signed peer download
+with SHA-256, device identity, pairing/trust, server control plane), this session added, in
+order:
+
+1. Provider-token detection in the sensitive-text filter (`ghp_`/`github_pat_`/`sk-`).
+2. macOS->Windows cross-compile workflow (`scripts/cross-windows.sh`).
+3. **End-to-end encryption of text clips** (new `airpaste-crypto` crate; server sees only
+   ciphertext).
+4. First **real Mac<->Windows LAN validation** (text decrypt + file transfer; see that section).
+5. **mDNS LAN discovery** (`_airpaste._tcp.local.`) so receivers auto-resolve the source's
+   address; default `--peer-bind` is now `0.0.0.0:17390`.
+6. **Encrypted relay data path** (`GET /v1/relay/{session_id}/ws`) with automatic
+   direct->relay fallback, plus network-loss hardening (reconnect backoff, connect/receive
+   timeouts) and resilient clipboard polling.
+
+Recent commits (newest first): `84d33af` relay fallback + resilient polling, `a681f98`
+relay data path + hardening, `830e954` mDNS, `e64d9a0` LAN validation notes, `e1ed3d1`
+text E2EE, `f894c26` cross-compile helper, `925d05d` provider-token filter.
 
 The workspace currently contains:
 
@@ -291,21 +303,36 @@ Platform:
 
 ## Recommended Next Steps
 
-### 1. Extend Encryption Beyond Text
+Direct/LAN + mDNS + encrypted relay (with auto-fallback) now form a working data plane for
+text and files. Candidate next steps, roughly prioritized:
 
-Text clips are now end-to-end encrypted. Remaining gaps:
+### 0. Verify relay on real hardware
 
-- Encrypt file manifests and (later) image payloads with the same `airpaste-crypto` primitives.
-- Bind clip content to the source device (AEAD AAD or a signature over the ciphertext) so recipients can verify authorship, not just confidentiality.
+The relay was validated only on one macOS host (forced and auto-fallback). It has not yet
+run Mac<->Windows on real machines. Worth a quick real-machine check (e.g. on the receiver,
+make the source unreachable or pass `--prefer-relay`) before relying on it.
+
+### 1. Harden the relay / fallback
+
+- Make the direct->relay fallback robust to partial direct transfers (the one-time grant is
+  consumed per index on the source; re-pulling a served index over relay returns `410`).
+  Options: per-route grants, or do not mark an index served until the byte stream completes.
+- Bound the server relay's in-memory queues and enforce session TTL mid-connection.
+
+### 2. Extend encryption beyond text
+
+- Encrypt file manifests and (later) image payloads with the same `airpaste-crypto` primitives
+  (`seal_bytes`/`open_bytes` already exist and are used by the relay).
+- Bind clip content to the source device (AEAD AAD or a signature over the ciphertext) so
+  recipients can verify authorship, not just confidentiality.
 - Add a UI/CLI fingerprint comparison for device public keys before trusting them.
 - Consider hiding plaintext length (currently leaked via `TextClip.utf8_len`).
 
-### 2. Improve File Data Plane
+### 3. Improve the file data plane
 
-Useful incremental improvements:
-
-- Add directory walking with file count and total-size caps.
-- Reuse the per-clip content-key + X25519 wrapping design for peer file payloads.
+- Add directory walking with file count and total-size caps (directories are currently
+  announced in the manifest but skipped by transfer).
+- Add transfer progress / resume.
 
 ### 3. Continue macOS Agent
 
