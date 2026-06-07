@@ -106,7 +106,10 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "airpaste_agent=debug".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        // Log to stderr (unbuffered): keeps stdout for data output (e.g. --print-latest-clip
+        // JSON) and ensures a long-running agent's logs flush promptly when redirected to a
+        // file, which block-buffered stdout does not do on Windows.
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     let args = Args::parse();
