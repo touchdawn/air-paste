@@ -12,6 +12,12 @@ use tray_icon::{
 };
 
 pub fn run() -> eframe::Result<()> {
+    // The tray is the isolated-mode UX, so default to isolated unless the user overrides it.
+    // Starting isolated registers both global hotkeys, which keeps the runtime toggle fully
+    // functional (hotkeys cannot be re-registered after launch).
+    if std::env::var_os("AIRPASTE_CLIPBOARD_MODE").is_none() {
+        std::env::set_var("AIRPASTE_CLIPBOARD_MODE", "isolated");
+    }
     airpaste_agent::init_tracing();
     let args = airpaste_agent::parse_args();
 
@@ -176,15 +182,16 @@ impl eframe::App for TrayApp {
                     ui.label("设备 ID");
                     ui.label(self.agent.device_id().unwrap_or_else(|| "—".to_string()));
                     ui.end_row();
-
-                    ui.label("模式");
-                    ui.label(if self.agent.isolated() {
-                        "隔离"
-                    } else {
-                        "系统"
-                    });
-                    ui.end_row();
                 });
+
+            ui.add_space(6.0);
+            let mut isolated = self.agent.isolated();
+            if ui
+                .checkbox(&mut isolated, "隔离模式(与系统剪贴板分开)")
+                .changed()
+            {
+                self.agent.set_isolated(isolated);
+            }
 
             ui.add_space(8.0);
             ui.separator();

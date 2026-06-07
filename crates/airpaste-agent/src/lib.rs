@@ -92,13 +92,14 @@ struct TextPublishPolicy {
 /// instead of being written to the system clipboard).
 #[derive(Clone)]
 struct ClipboardCtx {
-    mode: ClipboardMode,
+    // Shared so the tray UI can flip the mode at runtime; read live on every poll/apply.
+    isolated: Arc<AtomicBool>,
     inbox: Arc<Mutex<Option<String>>>,
 }
 
 impl ClipboardCtx {
     fn is_isolated(&self) -> bool {
-        self.mode == ClipboardMode::Isolated
+        self.isolated.load(Ordering::Relaxed)
     }
 }
 
@@ -108,7 +109,7 @@ pub struct AgentShared {
     connected: AtomicBool,
     device_name: std::sync::Mutex<String>,
     device_id: std::sync::Mutex<Option<String>>,
-    isolated: bool,
+    isolated: Arc<AtomicBool>,
 }
 
 impl AgentShared {
@@ -118,7 +119,9 @@ impl AgentShared {
             connected: AtomicBool::new(false),
             device_name: std::sync::Mutex::new(args.device_name()),
             device_id: std::sync::Mutex::new(None),
-            isolated: args.clipboard_mode == ClipboardMode::Isolated,
+            isolated: Arc::new(AtomicBool::new(
+                args.clipboard_mode == ClipboardMode::Isolated,
+            )),
         }
     }
 }
@@ -144,7 +147,14 @@ impl AgentHandle {
     }
 
     pub fn isolated(&self) -> bool {
-        self.shared.isolated
+        self.shared.isolated.load(Ordering::Relaxed)
+    }
+
+    /// Toggle isolated mode at runtime. Note: this changes the inbound/outbound text behaviour
+    /// live, but the `Ctrl+Shift+C` global hotkey is only registered if the agent *started* in
+    /// isolated mode (hotkeys cannot be re-registered after launch).
+    pub fn set_isolated(&self, value: bool) {
+        self.shared.isolated.store(value, Ordering::Relaxed);
     }
 
     /// The latest remote text held in the isolated-mode inbox, if any.
@@ -325,7 +335,7 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     let clipboard = Arc::new(Clipboard::new());
     let paste = Arc::new(PasteSimulator::new());
     let clip_ctx = ClipboardCtx {
-        mode: args.clipboard_mode,
+        isolated: shared.isolated.clone(),
         inbox: shared.inbox.clone(),
     };
     if clip_ctx.is_isolated() {
