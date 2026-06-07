@@ -239,6 +239,24 @@ Smoke coverage:
 - Repeated file index download returns `410`.
 - Single-file size limit rejects oversized local file publication.
 
+## Real-Machine Validation (2026-06-07)
+
+First end-to-end test between two real machines on the same LAN (Mac `192.168.50.199`
+client, Windows `192.168.50.200`), server on the Mac:
+
+- Text E2EE Mac->Win: decryption verified (`applied remote text clip` logs after AEAD +
+  UTF-8 succeed; the server-stored clip is ciphertext only, no plaintext leak).
+- File transfer Mac->Win: byte-exact with matching SHA-256, written to the receiver cache
+  (`downloaded remote file` + `applied downloaded files`). This path is unaffected by RDP
+  clipboard redirection and is the strongest evidence the peer data plane works cross-host.
+
+Known environment artifact (not a code bug): when the Windows box is reached over Remote
+Desktop, `rdpclip.exe` bidirectionally mirrors the clipboards, so text written by the agent
+to the Windows system clipboard can be clobbered (and `Get-Clipboard` shows stale/empty
+content). It also creates a publish feedback loop if the sender runs with
+`--publish-clipboard=true`. To verify system-clipboard landing cleanly, disable clipboard
+redirection in mstsc (Local Resources -> uncheck Clipboard) and retest.
+
 ## Important MVP Limitations
 
 Security and trust:
