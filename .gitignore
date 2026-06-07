@@ -5,3 +5,6 @@
 rustup-init.exe
 vs_BuildTools.exe
 /tools/
+.idea/
+.vscode/
+.DS_Store
