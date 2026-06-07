@@ -103,9 +103,12 @@ Main commands:
 ```powershell
 cargo +stable-x86_64-pc-windows-gnu check
 cargo +stable-x86_64-pc-windows-gnu build -p airpaste-agent -p airpaste-server
+cargo +stable-x86_64-pc-windows-gnu test -p airpaste-agent
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1 -Bind 127.0.0.1:18082 -AuthToken airpaste-smoke-secret
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-server.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-isolated.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-isolated-hotkey.ps1   # interactive; needs a desktop session
 ```
 
 On macOS:
@@ -289,6 +292,32 @@ Manual test (needs a real GUI session + Accessibility granted; cannot be automat
    clipboard to still hold the sentinel afterward.
 5. Select some text, press `Ctrl+Shift+C`. Expect it to be published (receiver log
    `pushed selection to AirPaste`) and your clipboard unchanged.
+
+On Windows there is a scripted helper for steps 1-5: `scripts/smoke-isolated.ps1` covers the
+headless inbound half (inbox stored, clipboard not overwritten), and
+`scripts/smoke-isolated-hotkey.ps1` is an interactive harness that sets up the receiver +
+sender, opens Notepad, prompts for the two hotkeys, and auto-checks the clipboard restore and
+the copy-publish.
+
+### Windows / RDP validation (2026-06-07)
+
+Verified on the real Windows agent at commit `5944f53`:
+
+- `cargo test -p airpaste-agent` (incl. the peer-grant reservation tests) and the existing
+  `smoke-agent.ps1` pass; `smoke-isolated.ps1` passes (inbound isolation: a remote text clip
+  lands in the inbox without overwriting the system clipboard).
+- Interactive `Ctrl+Shift+V` pastes the inbox text into Notepad and restores the system
+  clipboard (verified). `Ctrl+Shift+C` fires the handler and the synthetic copy puts the
+  selection on the clipboard.
+
+Known RDP limitation (environment, not a code bug): under `rdpclip` (RDP clipboard
+redirection), clipboard operations are delayed by several seconds. In one test the
+`Ctrl+Shift+V` paste appeared only ~10s later, and `Ctrl+Shift+C` logged
+`Ctrl+Shift+C captured no text selection` because the agent's ~600ms read-back of the
+synthesized copy raced `rdpclip`'s delayed clipboard rendering. On a local console session
+(or with clipboard redirection disabled in mstsc: Local Resources -> uncheck Clipboard) these
+are effectively instant. Polling longer is not a real fix for multi-second RDP latency (the
+hotkey would just hang), so the code is unchanged; retest the synthetic hotkeys off-RDP.
 
 ## Current File Transfer Security
 
