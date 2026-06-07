@@ -59,10 +59,49 @@ struct TrayApp {
     agent: AgentHandle,
 }
 
+/// macOS CJK fonts to try, in order. Arial Unicode is a single-face .ttf (loads cleanly);
+/// the .ttc collections are fallbacks (egui loads face 0).
+const CJK_FONT_CANDIDATES: &[&str] = &[
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+];
+
+/// Install a CJK-capable font as the primary UI font so Chinese text renders (egui's default
+/// fonts have no CJK glyphs). Best-effort: if no candidate is found, labels still render in
+/// whatever glyphs the defaults provide.
+fn install_cjk_font(ctx: &egui::Context) {
+    let Some(bytes) = CJK_FONT_CANDIDATES
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+    else {
+        eprintln!("airpaste-tray: no CJK font found; UI text may show missing glyphs");
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "cjk".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("cjk".to_owned());
+    ctx.set_fonts(fonts);
+}
+
 impl TrayApp {
-    fn new(_cc: &eframe::CreationContext<'_>, agent: AgentHandle) -> Self {
-        let show = MenuItem::new("Show AirPaste", true, None);
-        let quit = MenuItem::new("Quit AirPaste", true, None);
+    fn new(cc: &eframe::CreationContext<'_>, agent: AgentHandle) -> Self {
+        install_cjk_font(&cc.egui_ctx);
+
+        let show = MenuItem::new("显示 AirPaste", true, None);
+        let quit = MenuItem::new("退出 AirPaste", true, None);
         let menu = Menu::new();
         menu.append(&show).expect("append show");
         menu.append(&PredefinedMenuItem::separator()).expect("append sep");
@@ -103,9 +142,9 @@ impl eframe::App for TrayApp {
             ui.add_space(4.0);
 
             if self.agent.connected() {
-                ui.colored_label(egui::Color32::from_rgb(0x2e, 0xb8, 0x72), "● Connected");
+                ui.colored_label(egui::Color32::from_rgb(0x2e, 0xb8, 0x72), "● 已连接");
             } else {
-                ui.colored_label(egui::Color32::GRAY, "○ Connecting…");
+                ui.colored_label(egui::Color32::GRAY, "○ 连接中…");
             }
 
             ui.add_space(6.0);
@@ -113,19 +152,19 @@ impl eframe::App for TrayApp {
                 .num_columns(2)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| {
-                    ui.label("Device");
+                    ui.label("设备");
                     ui.label(self.agent.device_name());
                     ui.end_row();
 
-                    ui.label("Device ID");
+                    ui.label("设备 ID");
                     ui.label(self.agent.device_id().unwrap_or_else(|| "—".to_string()));
                     ui.end_row();
 
-                    ui.label("Mode");
+                    ui.label("模式");
                     ui.label(if self.agent.isolated() {
-                        "isolated"
+                        "隔离"
                     } else {
-                        "system"
+                        "系统"
                     });
                     ui.end_row();
                 });
@@ -133,16 +172,16 @@ impl eframe::App for TrayApp {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            ui.label("Latest received (isolated inbox):");
+            ui.label("最近收到(隔离收件箱):");
             match self.agent.latest_inbox() {
                 Some(text) => {
                     ui.label(preview(&text));
-                    if ui.button("Copy to clipboard").clicked() {
+                    if ui.button("复制到剪贴板").clicked() {
                         ctx.copy_text(text);
                     }
                 }
                 None => {
-                    ui.weak("(nothing yet)");
+                    ui.weak("(暂无)");
                 }
             }
         });
