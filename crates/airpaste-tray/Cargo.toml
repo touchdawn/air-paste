@@ -12,3 +12,5 @@ airpaste-agent = { path = "../airpaste-agent" }
 eframe.workspace = true
 tray-icon.workspace = true
 tokio.workspace = true
+# Same major as eframe's winit (0.30) so the event-loop-builder hook types unify.
+winit = "0.30"

@@ -42,6 +42,11 @@ pub fn run() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 320.0])
             .with_title("AirPaste"),
+        // Run as a menu-bar (accessory) app: no Dock icon, no app menu bar.
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        })),
         ..Default::default()
     };
     eframe::run_native(
@@ -57,6 +62,9 @@ struct TrayApp {
     show_id: MenuId,
     quit_id: MenuId,
     agent: AgentHandle,
+    // Set when the user picks Quit, so the window close that follows actually exits (a plain
+    // window close just hides the window — the app keeps living in the menu bar).
+    quitting: bool,
 }
 
 /// macOS CJK fonts to try, in order. Arial Unicode is a single-face .ttf (loads cleanly);
@@ -119,6 +127,7 @@ impl TrayApp {
             show_id: show.id().clone(),
             quit_id: quit.id().clone(),
             agent,
+            quitting: false,
         }
     }
 }
@@ -130,11 +139,19 @@ impl eframe::App for TrayApp {
         ctx.request_repaint_after(Duration::from_millis(200));
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.quit_id {
+                self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else if event.id == self.show_id {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
+        }
+
+        // A plain window close (red button) hides the window and keeps the app in the menu
+        // bar; only the tray's Quit truly exits.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
