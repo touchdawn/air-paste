@@ -5,12 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# macOS-first menu-bar UI. The GUI stack + embedded agent are only pulled in on macOS so the
-# rest of the workspace still builds (and cross-compiles to Windows) without the eframe tree.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Cross-platform menu-bar / tray UI. The egui stack + embedded agent build on both macOS and
+# Windows; verified to cross-compile to x86_64-pc-windows-gnu (eframe's default glow/OpenGL
+# backend links fine under mingw-w64).
+[dependencies]
 airpaste-agent = { path = "../airpaste-agent" }
 eframe.workspace = true
 tray-icon.workspace = true
 tokio.workspace = true
-# Same major as eframe's winit (0.30) so the event-loop-builder hook types unify.
+
+# winit is only needed directly for the macOS accessory ActivationPolicy hook; the Windows
+# "no taskbar" behaviour goes through egui's cross-platform ViewportBuilder instead. Same major
+# as eframe's winit (0.30) so the event-loop-builder hook types unify.
+[target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"

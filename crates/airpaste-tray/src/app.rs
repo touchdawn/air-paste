@@ -1,6 +1,7 @@
-//! macOS menu-bar UI: an eframe (egui) window plus a tray-icon menu, driving an embedded
+//! Cross-platform tray UI: an eframe (egui) window plus a tray-icon menu, driving an embedded
 //! Air Paste agent. The agent runs on a background Tokio runtime; the UI observes it via an
-//! `AgentHandle` and repaints on a steady cadence.
+//! `AgentHandle` and repaints on a steady cadence. Per-OS window/font behaviour is in
+//! `crate::platform`.
 
 use std::{sync::mpsc, thread, time::Duration};
 
@@ -10,6 +11,8 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     Icon, TrayIcon, TrayIconBuilder,
 };
+
+use crate::platform;
 
 pub fn run() -> eframe::Result<()> {
     // The tray is the isolated-mode UX, so default to isolated unless the user overrides it.
@@ -44,17 +47,15 @@ pub fn run() -> eframe::Result<()> {
 
     let agent = rx.recv().expect("agent handle from runtime thread");
 
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 320.0])
             .with_title("AirPaste"),
-        // Run as a menu-bar (accessory) app: no Dock icon, no app menu bar.
-        event_loop_builder: Some(Box::new(|builder| {
-            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-            builder.with_activation_policy(ActivationPolicy::Accessory);
-        })),
         ..Default::default()
     };
+    // Run as a tray-only app: macOS accessory (no Dock), Windows hidden from the taskbar.
+    platform::apply_tray_window_policy(&mut options);
+
     eframe::run_native(
         "AirPaste",
         options,
@@ -63,29 +64,21 @@ pub fn run() -> eframe::Result<()> {
 }
 
 struct TrayApp {
-    // Kept alive for the lifetime of the app so the icon stays in the menu bar.
+    // Kept alive for the lifetime of the app so the icon stays in the menu bar / tray.
     _tray: TrayIcon,
     show_id: MenuId,
     quit_id: MenuId,
     agent: AgentHandle,
     // Set when the user picks Quit, so the window close that follows actually exits (a plain
-    // window close just hides the window — the app keeps living in the menu bar).
+    // window close just hides the window — the app keeps living in the tray).
     quitting: bool,
 }
-
-/// macOS CJK fonts to try, in order. Arial Unicode is a single-face .ttf (loads cleanly);
-/// the .ttc collections are fallbacks (egui loads face 0).
-const CJK_FONT_CANDIDATES: &[&str] = &[
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "/System/Library/Fonts/STHeiti Light.ttc",
-];
 
 /// Install a CJK-capable font as the primary UI font so Chinese text renders (egui's default
 /// fonts have no CJK glyphs). Best-effort: if no candidate is found, labels still render in
 /// whatever glyphs the defaults provide.
 fn install_cjk_font(ctx: &egui::Context) {
-    let Some(bytes) = CJK_FONT_CANDIDATES
+    let Some(bytes) = platform::CJK_FONT_CANDIDATES
         .iter()
         .find_map(|path| std::fs::read(path).ok())
     else {
@@ -153,8 +146,8 @@ impl eframe::App for TrayApp {
             }
         }
 
-        // A plain window close (red button) hides the window and keeps the app in the menu
-        // bar; only the tray's Quit truly exits.
+        // A plain window close (red button / X) hides the window and keeps the app in the tray;
+        // only the tray's Quit truly exits.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));

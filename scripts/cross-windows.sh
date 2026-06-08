@@ -22,4 +22,5 @@ if [ "$#" -gt 0 ]; then
   shift
 fi
 
-exec cargo "$cmd" --target x86_64-pc-windows-gnu -p airpaste-agent -p airpaste-server "$@"
+exec cargo "$cmd" --target x86_64-pc-windows-gnu \
+  -p airpaste-agent -p airpaste-server -p airpaste-tray "$@"
