@@ -8,8 +8,8 @@ pub enum ClipboardMode {
     /// clipboard. This is the original behaviour.
     System,
     /// Isolated channel: remote text is kept in an in-app inbox instead of overwriting the
-    /// system clipboard, and `Ctrl+Shift+C` / `Ctrl+Shift+V` move text in and out via
-    /// synthetic copy/paste without disturbing whatever is on the system clipboard.
+    /// system clipboard, and `Alt+C` / `Alt+V` (macOS: `Option+C` / `Option+V`) move text in and
+    /// out via synthetic copy/paste without disturbing whatever is on the system clipboard.
     Isolated,
 }
 
@@ -171,8 +171,8 @@ pub struct Args {
     pub prefer_relay: bool,
 
     /// Clipboard integration mode. `system` (default) syncs with the system clipboard;
-    /// `isolated` keeps remote text in an in-app inbox and uses Ctrl+Shift+C / Ctrl+Shift+V
-    /// to move text in and out without touching the system clipboard.
+    /// `isolated` keeps remote text in an in-app inbox and uses Alt+C / Alt+V (macOS Option+C /
+    /// Option+V) to move text in and out without touching the system clipboard.
     #[arg(
         long,
         env = "AIRPASTE_CLIPBOARD_MODE",

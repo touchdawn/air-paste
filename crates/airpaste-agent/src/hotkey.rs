@@ -13,9 +13,9 @@ pub use macos::spawn_hotkey_listener;
 /// A global hotkey the agent listens for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeyAction {
-    /// Ctrl+Shift+V — paste remote content (files, or in isolated mode the inbox text).
+    /// Alt+V (Option+V on macOS) — paste remote content (files, or in isolated mode the inbox text).
     PasteRemote,
-    /// Ctrl+Shift+C — capture the current selection into the AirPaste channel (isolated mode).
+    /// Alt+C (Option+C on macOS) — capture the current selection into the AirPaste channel (isolated).
     CopyToAirPaste,
 }
 

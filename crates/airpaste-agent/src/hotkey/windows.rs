@@ -2,9 +2,7 @@ use crate::hotkey::HotkeyAction;
 use windows_sys::Win32::{
     Foundation::HWND,
     UI::{
-        Input::KeyboardAndMouse::{
-            RegisterHotKey, UnregisterHotKey, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
-        },
+        Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_NOREPEAT},
         WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY},
     },
 };
@@ -36,12 +34,12 @@ fn run_hotkey_loop(
         RegisterHotKey(
             HWND::default(),
             HOTKEY_ID_REMOTE_PASTE,
-            MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
+            MOD_ALT | MOD_NOREPEAT,
             VK_V,
         ) != 0
     };
     if !registered {
-        anyhow::bail!("RegisterHotKey(Ctrl+Shift+V) failed");
+        anyhow::bail!("RegisterHotKey(Alt+V) failed");
     }
     let _paste_guard = HotkeyGuard(HOTKEY_ID_REMOTE_PASTE);
 
@@ -50,12 +48,12 @@ fn run_hotkey_loop(
             RegisterHotKey(
                 HWND::default(),
                 HOTKEY_ID_COPY,
-                MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
+                MOD_ALT | MOD_NOREPEAT,
                 VK_C,
             ) != 0
         };
         if !registered {
-            anyhow::bail!("RegisterHotKey(Ctrl+Shift+C) failed");
+            anyhow::bail!("RegisterHotKey(Alt+C) failed");
         }
         Some(HotkeyGuard(HOTKEY_ID_COPY))
     } else {
@@ -63,9 +61,9 @@ fn run_hotkey_loop(
     };
 
     if enable_copy {
-        tracing::info!("registered hotkeys Ctrl+Shift+V and Ctrl+Shift+C");
+        tracing::info!("registered hotkeys Alt+V and Alt+C");
     } else {
-        tracing::info!("registered remote paste hotkey Ctrl+Shift+V");
+        tracing::info!("registered remote paste hotkey Alt+V");
     }
 
     loop {

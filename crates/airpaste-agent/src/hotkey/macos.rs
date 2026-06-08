@@ -8,15 +8,15 @@ const HOTKEY_ID_COPY: u32 = 2;
 const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"Apst");
 const KEY_CODE_V: u32 = 9;
 const KEY_CODE_C: u32 = 8;
-const SHIFT_KEY: u32 = 1 << 9;
-const CONTROL_KEY: u32 = 1 << 12;
+// Carbon optionKey modifier mask (Option == Alt). Used alone so the hotkey is Option+C / Option+V.
+const OPTION_KEY: u32 = 1 << 11;
 const NO_ERR: OSStatus = 0;
 const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
 const EVENT_KIND_HOTKEY_PRESSED: u32 = 5;
 const EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
 const TYPE_EVENT_HOTKEY_ID: u32 = u32::from_be_bytes(*b"hkid");
-const REMOTE_PASTE_HOTKEY_LABEL: &str = "Ctrl+Shift+V";
-const COPY_HOTKEY_LABEL: &str = "Ctrl+Shift+C";
+const REMOTE_PASTE_HOTKEY_LABEL: &str = "Option+V";
+const COPY_HOTKEY_LABEL: &str = "Option+C";
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -147,7 +147,7 @@ fn run_hotkey_loop(
     let status = unsafe {
         RegisterEventHotKey(
             KEY_CODE_V,
-            CONTROL_KEY | SHIFT_KEY,
+            OPTION_KEY,
             EventHotKeyID {
                 signature: HOTKEY_SIGNATURE,
                 id: HOTKEY_ID_REMOTE_PASTE,
@@ -173,7 +173,7 @@ fn run_hotkey_loop(
         let status = unsafe {
             RegisterEventHotKey(
                 KEY_CODE_C,
-                CONTROL_KEY | SHIFT_KEY,
+                OPTION_KEY,
                 EventHotKeyID {
                     signature: HOTKEY_SIGNATURE,
                     id: HOTKEY_ID_COPY,

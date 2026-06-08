@@ -1,5 +1,5 @@
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_SHIFT,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
 };
 
 pub struct PasteSimulator;
@@ -22,10 +22,12 @@ impl PasteSimulator {
     }
 
     /// Release the modifiers the user is holding from the triggering hotkey, then send a
-    /// clean Ctrl+<key> chord so the synthesized keystroke is not mixed with Ctrl+Shift.
+    /// clean Ctrl+<key> chord so the synthesized keystroke is not mixed with the held Alt.
     fn send_ctrl_chord(&self, vk: u16) -> anyhow::Result<()> {
         let inputs = [
-            key_input(VK_SHIFT, KEYEVENTF_KEYUP),
+            // Release the Alt held from the Alt+C / Alt+V trigger so it doesn't combine into the
+            // synthesized Ctrl+<key> (which would read as Ctrl+Alt+<key>, not a copy/paste).
+            key_input(VK_MENU, KEYEVENTF_KEYUP),
             key_input(VK_CONTROL, KEYEVENTF_KEYUP),
             key_input(VK_CONTROL, 0),
             key_input(vk, 0),

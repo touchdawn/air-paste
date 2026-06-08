@@ -61,7 +61,7 @@ impl PasteSimulator {
 }
 
 /// Post a Command+<key> chord. The Command flag is set explicitly on each event so any
-/// modifier keys the user is physically holding (e.g. the Ctrl+Shift of the triggering
+/// modifier keys the user is physically holding (e.g. the Option of the triggering
 /// hotkey) do not leak into the synthesized keystroke.
 fn post_command_chord(keycode: CGKeyCode) -> anyhow::Result<()> {
     unsafe {

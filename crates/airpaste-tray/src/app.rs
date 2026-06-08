@@ -451,9 +451,10 @@ impl eframe::App for TrayApp {
                 ui.separator();
                 ui.add_space(4.0);
                 ui.label(format!(
-                    "待接收文件:{} 个(共 {}) — 按 Ctrl+Shift+V 接收",
+                    "待接收文件:{} 个(共 {}) — 按 {}+V 接收",
                     pending.count,
-                    human_size(pending.total_size)
+                    human_size(pending.total_size),
+                    airpaste_agent::HOTKEY_MOD_NAME,
                 ));
                 egui::ScrollArea::vertical()
                     .id_salt("pending-files")

@@ -49,13 +49,31 @@ pub struct PairingCode(pub String);
 
 impl PairingCode {
     pub fn new() -> Self {
-        let raw = Ulid::new().to_string();
-        Self(raw[raw.len() - 8..].to_ascii_uppercase())
+        // A short 6-digit numeric code (easy to read out / type), from a ULID's random low bits.
+        let value = u128::from(Ulid::new()) % 1_000_000;
+        Self(format!("{value:06}"))
     }
 }
 
 impl Default for PairingCode {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PairingCode;
+
+    #[test]
+    fn pairing_code_is_six_digits() {
+        for _ in 0..1000 {
+            let code = PairingCode::new().0;
+            assert_eq!(code.len(), 6, "code {code:?} is not 6 chars");
+            assert!(
+                code.chars().all(|c| c.is_ascii_digit()),
+                "code {code:?} is not all digits"
+            );
+        }
     }
 }

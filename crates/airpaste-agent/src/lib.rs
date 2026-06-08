@@ -58,7 +58,7 @@ const WS_RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// our text, paste, then let the target app consume it before restoring the user's clipboard.
 const CLIPBOARD_SETTLE: Duration = Duration::from_millis(80);
 const PASTE_CONSUME: Duration = Duration::from_millis(150);
-/// Wait for the triggering hotkey's Ctrl+Shift to be released before synthesizing a chord, so
+/// Wait for the triggering hotkey's Alt/Option to be released before synthesizing a chord, so
 /// the held modifiers do not combine with it (e.g. turning the synthetic Cmd+C into Ctrl+Cmd+C,
 /// which is not "copy"). The paste path already waits via CLIPBOARD_SETTLE after set_text.
 const HOTKEY_MODIFIER_RELEASE: Duration = Duration::from_millis(120);
@@ -69,6 +69,10 @@ const COPY_POLL_ATTEMPTS: usize = 15;
 /// from "the copy did nothing"; uses zero-width separators so it never collides with a real
 /// selection.
 const COPY_SENTINEL: &str = "\u{2063}airpaste-copy-sentinel\u{2063}";
+
+/// Display name of the isolated-mode hotkey modifier (Alt on Windows, the same physical key is
+/// Option on macOS), used in user-facing strings. The chords are `<mod>+C` / `<mod>+V`.
+pub const HOTKEY_MOD_NAME: &str = if cfg!(target_os = "macos") { "Option" } else { "Alt" };
 
 #[derive(Clone)]
 struct FileTransferPolicy {
@@ -92,7 +96,7 @@ struct TextPublishPolicy {
     max_text_clip_bytes: usize,
 }
 
-/// Monotonic arrival counter so the isolated-mode `Ctrl+Shift+V` can paste whichever channel
+/// Monotonic arrival counter so the isolated-mode `Alt+V` can paste whichever channel
 /// (text inbox vs pending files) arrived most recently.
 static CLIP_ARRIVAL_SEQ: AtomicU64 = AtomicU64::new(0);
 fn next_arrival_seq() -> u64 {
@@ -147,7 +151,7 @@ impl ClipboardCtx {
 /// How many recent isolated-inbox texts to retain for the UI history.
 const INBOX_HISTORY_MAX: usize = 20;
 
-/// A summary of remote files waiting to be applied (downloaded on `Ctrl+Shift+V`), for the UI.
+/// A summary of remote files waiting to be applied (downloaded on `Alt+V`), for the UI.
 #[derive(Clone, Debug)]
 pub struct PendingFiles {
     pub count: usize,
@@ -226,7 +230,7 @@ impl AgentHandle {
     }
 
     /// Toggle isolated mode at runtime. Note: this changes the inbound/outbound text behaviour
-    /// live, but the `Ctrl+Shift+C` global hotkey is only registered if the agent *started* in
+    /// live, but the `Alt+C` global hotkey is only registered if the agent *started* in
     /// isolated mode (hotkeys cannot be re-registered after launch).
     pub fn set_isolated(&self, value: bool) {
         self.shared.isolated.store(value, Ordering::Relaxed);
@@ -255,7 +259,7 @@ impl AgentHandle {
         self.shared.last_error.lock().unwrap().clone()
     }
 
-    /// Remote files waiting to be applied (via `Ctrl+Shift+V`), if any. Present in both clipboard
+    /// Remote files waiting to be applied (via `Alt+V`), if any. Present in both clipboard
     /// modes; in isolated mode they coexist with the text inbox and the more recent one wins.
     pub fn pending_files(&self) -> Option<PendingFiles> {
         let guard = self.shared.pending_files.try_lock().ok()?;
@@ -486,7 +490,9 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         file_seq: shared.file_seq.clone(),
     };
     if clip_ctx.is_isolated() {
-        tracing::info!("clipboard isolated mode: Ctrl+Shift+C pushes the selection, Ctrl+Shift+V pastes from AirPaste");
+        tracing::info!(
+            "clipboard isolated mode: {HOTKEY_MOD_NAME}+C pushes the selection, {HOTKEY_MOD_NAME}+V pastes from AirPaste"
+        );
         if !paste.accessibility_trusted() {
             tracing::warn!(
                 "isolated mode needs Accessibility permission to synthesize copy/paste; \
@@ -683,7 +689,7 @@ async fn poll_clipboard(
             Err(error) => tracing::warn!(%error, "failed to read file clipboard"),
         }
 
-        // In isolated mode, text is only published on demand via Ctrl+Shift+C, never by
+        // In isolated mode, text is only published on demand via Alt+C, never by
         // watching the system clipboard.
         if clip_ctx.is_isolated() {
             continue;
@@ -1461,7 +1467,7 @@ async fn run_ws(
                                 text_clip_ttl_secs,
                             )
                             .await
-                            .context("Ctrl+Shift+C failed"),
+                            .with_context(|| format!("{HOTKEY_MOD_NAME}+C failed")),
                             HotkeyAction::PasteRemote => {
                                 paste_remote_via_hotkey(
                                     &hotkey_clip_ctx,
@@ -1480,7 +1486,7 @@ async fn run_ws(
                                     &hotkey_cache_dir,
                                 )
                                 .await
-                                .context("Ctrl+Shift+V failed")
+                                .with_context(|| format!("{HOTKEY_MOD_NAME}+V failed"))
                             }
                         };
                         if let Err(error) = result {
@@ -1640,7 +1646,7 @@ async fn handle_server_event(
                     if clip_ctx.is_isolated() {
                         // Isolated mode: keep the text in the in-app inbox (newest first,
                         // bounded history); the system clipboard is left untouched until the
-                        // user presses Ctrl+Shift+V.
+                        // user presses Alt+V.
                         {
                             let mut inbox = clip_ctx.inbox.lock().await;
                             inbox.push_front(text);
@@ -1736,7 +1742,7 @@ async fn handle_server_event(
     Ok(())
 }
 
-/// Ctrl+Shift+V dispatch. In isolated mode, paste whichever channel arrived most recently — the
+/// Alt+V dispatch. In isolated mode, paste whichever channel arrived most recently — the
 /// inbox text (zero-touch) or the pending remote files — falling back to the other if the chosen
 /// one is empty. In system mode, run the file-paste flow.
 #[allow(clippy::too_many_arguments)]
@@ -1809,7 +1815,7 @@ async fn paste_inbox_text(
     Ok(true)
 }
 
-/// Ctrl+Shift+C: synthesize a copy of the current selection, read it off the clipboard,
+/// Alt+C: synthesize a copy of the current selection, read it off the clipboard,
 /// restore the user's clipboard, and publish it to the AirPaste channel.
 async fn copy_selection_to_airpaste(
     client: &ServerClient,
@@ -1819,7 +1825,7 @@ async fn copy_selection_to_airpaste(
     text_clip_ttl_secs: u64,
 ) -> anyhow::Result<()> {
     let saved = clipboard.get_text().ok().flatten();
-    // Let the triggering Ctrl+Shift release so the synthetic copy is a clean Ctrl/Cmd+C.
+    // Let the triggering Alt/Option release so the synthetic copy is a clean Ctrl/Cmd+C.
     tokio::time::sleep(HOTKEY_MODIFIER_RELEASE).await;
     // Overwrite the clipboard with a sentinel BEFORE the synthetic copy, so we can tell a real
     // capture (clipboard became some other non-empty text) from "the copy did nothing" (still
@@ -1839,8 +1845,8 @@ async fn copy_selection_to_airpaste(
     }
     let Some(text) = selection else {
         tracing::warn!(
-            "Ctrl+Shift+C captured no text selection (select text in a normal app first; over \
-             RDP the clipboard can lag several seconds)"
+            "{HOTKEY_MOD_NAME}+C captured no text selection (select text in a normal app first; \
+             over RDP the clipboard can lag several seconds)"
         );
         return Ok(());
     };
