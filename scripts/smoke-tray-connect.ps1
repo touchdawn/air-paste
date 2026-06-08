@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Bind = "127.0.0.1:18089",
     [string]$AuthToken = ""
 )
@@ -16,11 +16,19 @@ param(
 #
 # On success the server + tray are LEFT RUNNING so you can look at the window. Tear them down
 # with the command printed at the end (or just close the tray window and stop the server).
+#
+# This file is saved as UTF-8 with a BOM so Windows PowerShell 5.x reads the Chinese literals
+# correctly (without a BOM it falls back to the system ANSI code page and mangles them).
 
 $ErrorActionPreference = "Stop"
 
-# Make the embedded agent log at info so the asserts below can see the key lines.
-if (-not $env:RUST_LOG) { $env:RUST_LOG = "airpaste_agent=info" }
+# Force the embedded agent to log at info so the asserts below can see the key lines. This must
+# OVERRIDE any pre-existing RUST_LOG (e.g. RUST_LOG=warn in the outer shell would hide them and
+# leave the log empty — that was a real failure). Override the floor via AIRPASTE_SMOKE_RUST_LOG.
+if (-not $env:AIRPASTE_SMOKE_RUST_LOG) { $env:AIRPASTE_SMOKE_RUST_LOG = "airpaste_agent=info" }
+$env:RUST_LOG = $env:AIRPASTE_SMOKE_RUST_LOG
+# Make any Chinese we print render regardless of the console's active code page.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $serverExe = Join-Path $root "target\debug\airpaste-server.exe"
@@ -107,8 +115,11 @@ try {
     Write-Host "Tray paired + trusted. Letting the control WebSocket subscribe..."
     Start-Sleep -Seconds 3
 
-    # Publish a recognizable text clip from the bootstrap device.
-    $sentinel = "AirPaste 托盘连接测试 $(Get-Date -Format o)"
+    # Publish a recognizable text clip from the bootstrap device. Build the Chinese from code
+    # points so the published text is correct no matter how this .ps1 was decoded:
+    # 托盘连接测试 = U+6258 U+76D8 U+8FDE U+63A5 U+6D4B U+8BD5.
+    $zh = -join [char[]]@(0x6258, 0x76D8, 0x8FDE, 0x63A5, 0x6D4B, 0x8BD5)
+    $sentinel = "AirPaste $zh $(Get-Date -Format o)"
     Write-Host "Publishing text: $sentinel"
     $pubArgs = @(
         "--server-url", $baseUrl,
