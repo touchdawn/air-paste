@@ -13,6 +13,8 @@ airpaste-agent = { path = "../airpaste-agent" }
 eframe.workspace = true
 tray-icon.workspace = true
 tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 # winit is only needed directly for the macOS accessory ActivationPolicy hook; the Windows
 # "no taskbar" behaviour goes through egui's cross-platform ViewportBuilder instead. Same major

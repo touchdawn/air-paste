@@ -13,11 +13,15 @@ pub enum ClipboardMode {
     Isolated,
 }
 
+/// Default control-plane server URL. Exposed so embedders (the tray) can tell whether the
+/// parsed `server_url` is still the default (and may be overridden by their own config).
+pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
+
 #[derive(Debug, Parser)]
 #[command(name = "airpaste-agent")]
 #[command(about = "Air Paste desktop agent MVP")]
 pub struct Args {
-    #[arg(long, env = "AIRPASTE_SERVER", default_value = "http://127.0.0.1:8080")]
+    #[arg(long, env = "AIRPASTE_SERVER", default_value = DEFAULT_SERVER_URL)]
     pub server_url: String,
 
     #[arg(long, env = "AIRPASTE_AUTH_TOKEN")]
@@ -245,4 +249,27 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+/// Per-user AirPaste directory for embedder config (the tray): `~/Library/Application
+/// Support/AirPaste` (macOS), `%APPDATA%\AirPaste` (Windows), else the current directory.
+pub fn app_support_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("AirPaste");
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            return PathBuf::from(appdata).join("AirPaste");
+        }
+    }
+
+    PathBuf::from(".")
 }

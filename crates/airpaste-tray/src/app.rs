@@ -3,7 +3,7 @@
 //! `AgentHandle` and repaints on a steady cadence. Per-OS window/font behaviour is in
 //! `crate::platform`.
 
-use std::{sync::mpsc, thread, time::Duration};
+use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 
 use airpaste_agent::AgentHandle;
 use eframe::egui;
@@ -12,6 +12,7 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
 };
 
+use crate::config::TrayConfig;
 use crate::platform;
 
 pub fn run() -> eframe::Result<()> {
@@ -22,7 +23,31 @@ pub fn run() -> eframe::Result<()> {
         std::env::set_var("AIRPASTE_CLIPBOARD_MODE", "isolated");
     }
     airpaste_agent::init_tracing();
-    let args = airpaste_agent::parse_args();
+    let mut args = airpaste_agent::parse_args();
+
+    // Overlay persisted tray config where the parsed args are still at their defaults, so
+    // explicit CLI flags / env vars always win (keeps the smoke scripts working), then the
+    // saved config, then the agent default.
+    let config = TrayConfig::load();
+    if args.server_url == airpaste_agent::DEFAULT_SERVER_URL {
+        if let Some(url) = config.server_url.clone().filter(|u| !u.trim().is_empty()) {
+            args.server_url = url;
+        }
+    }
+    if args.pair_code.is_none() {
+        args.pair_code = config.pair_code.clone().filter(|c| !c.trim().is_empty());
+    }
+    if args.auth_token.is_none() {
+        args.auth_token = config.auth_token.clone().filter(|t| !t.is_empty());
+    }
+
+    // Snapshot the values the settings panel needs before `args` is moved into the agent.
+    let settings = Settings {
+        state_path: args.state_path(),
+        server_url: args.server_url.clone(),
+        auth_token: args.auth_token.clone().unwrap_or_default(),
+        pair_code: args.pair_code.clone().unwrap_or_default(),
+    };
 
     // eframe owns the main thread, so the Tokio runtime + agent live on a background thread.
     let (tx, rx) = mpsc::channel();
@@ -49,7 +74,7 @@ pub fn run() -> eframe::Result<()> {
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([420.0, 420.0])
+            .with_inner_size([440.0, 520.0])
             .with_title("AirPaste")
             .with_icon(window_icon()),
         ..Default::default()
@@ -60,8 +85,16 @@ pub fn run() -> eframe::Result<()> {
     eframe::run_native(
         "AirPaste",
         options,
-        Box::new(move |cc| Ok(Box::new(TrayApp::new(cc, agent)))),
+        Box::new(move |cc| Ok(Box::new(TrayApp::new(cc, agent, settings)))),
     )
+}
+
+/// Connection settings captured at launch to seed the settings panel.
+struct Settings {
+    state_path: PathBuf,
+    server_url: String,
+    auth_token: String,
+    pair_code: String,
 }
 
 struct TrayApp {
@@ -73,6 +106,14 @@ struct TrayApp {
     // Set when the user picks Quit, so the window close that follows actually exits (a plain
     // window close just hides the window — the app keeps living in the tray).
     quitting: bool,
+    // Settings panel state.
+    state_path: PathBuf,
+    server_url_input: String,
+    auth_token_input: String,
+    pair_code_input: String,
+    // Once connected, the one-shot pair code is cleared from the saved config (reusing a
+    // consumed code is a hard error on the next connect). Done once per launch.
+    pair_code_cleared: bool,
 }
 
 /// Install a CJK-capable font as the primary UI font so Chinese text renders (egui's default
@@ -105,7 +146,7 @@ fn install_cjk_font(ctx: &egui::Context) {
 }
 
 impl TrayApp {
-    fn new(cc: &eframe::CreationContext<'_>, agent: AgentHandle) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, agent: AgentHandle, settings: Settings) -> Self {
         install_cjk_font(&cc.egui_ctx);
 
         let show = MenuItem::new("显示 AirPaste", true, None);
@@ -128,8 +169,61 @@ impl TrayApp {
             quit_id: quit.id().clone(),
             agent,
             quitting: false,
+            state_path: settings.state_path,
+            server_url_input: settings.server_url,
+            auth_token_input: settings.auth_token,
+            pair_code_input: settings.pair_code,
+            pair_code_cleared: false,
         }
     }
+
+    /// Persist the entered connection settings and relaunch so the embedded agent connects with
+    /// them. We re-exec the process (rather than restart the agent in place) so the OS reclaims
+    /// the agent's bound peer port, global hotkeys, and mDNS registration — no leaked tasks.
+    fn save_and_reconnect(&self) {
+        let server_url = self.server_url_input.trim().to_string();
+        if server_url.is_empty() {
+            return;
+        }
+        let mut config = TrayConfig::load();
+        let server_changed = config.last_server_url.as_deref() != Some(server_url.as_str());
+        config.server_url = Some(server_url.clone());
+        config.auth_token = Some(self.auth_token_input.trim().to_string())
+            .filter(|t: &String| !t.is_empty());
+        config.pair_code = Some(self.pair_code_input.trim().to_string())
+            .filter(|c: &String| !c.is_empty());
+        config.last_server_url = Some(server_url);
+        if let Err(error) = config.save() {
+            eprintln!("airpaste-tray: failed to save config: {error}");
+        }
+        // Switching servers invalidates the device id registered on the old server; clearing it
+        // forces a clean re-registration on the new one (keys are preserved).
+        if server_changed {
+            clear_device_id(&self.state_path);
+        }
+        relaunch();
+    }
+}
+
+/// Clear the cached `device_id` in the agent state file (keeping the identity keys) so the next
+/// launch re-registers. Best-effort; a missing/locked file is ignored.
+fn clear_device_id(state_path: &std::path::Path) {
+    let state_file = airpaste_agent::StateFile::new(state_path.to_path_buf());
+    if let Ok(mut state) = state_file.load() {
+        if state.device_id.is_some() {
+            state.device_id = None;
+            let _ = state_file.save(&state);
+        }
+    }
+}
+
+/// Relaunch this executable (which will read the freshly saved tray config) and exit. Passing no
+/// connection flags means the new process picks up the persisted config.
+fn relaunch() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+    std::process::exit(0);
 }
 
 impl eframe::App for TrayApp {
@@ -152,6 +246,18 @@ impl eframe::App for TrayApp {
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        // Once the (re)connection succeeds, drop the one-shot pair code from the saved config so
+        // a later relaunch does not re-confirm an already-consumed code (a hard error).
+        if !self.pair_code_cleared && self.agent.connected() {
+            self.pair_code_cleared = true;
+            let mut config = TrayConfig::load();
+            if config.pair_code.is_some() {
+                config.pair_code = None;
+                let _ = config.save();
+            }
+            self.pair_code_input.clear();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -191,6 +297,42 @@ impl eframe::App for TrayApp {
             {
                 self.agent.set_isolated(isolated);
             }
+
+            ui.add_space(6.0);
+            egui::CollapsingHeader::new("设置 / 连接")
+                .default_open(!self.agent.connected())
+                .show(ui, |ui| {
+                    egui::Grid::new("settings")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("服务器地址");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.server_url_input)
+                                    .hint_text("http://主机:端口"),
+                            );
+                            ui.end_row();
+
+                            ui.label("配对码");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.pair_code_input)
+                                    .hint_text("首次连接需要"),
+                            );
+                            ui.end_row();
+
+                            ui.label("认证令牌");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.auth_token_input)
+                                    .hint_text("可选"),
+                            );
+                            ui.end_row();
+                        });
+                    ui.add_space(4.0);
+                    if ui.button("保存并连接").clicked() {
+                        self.save_and_reconnect();
+                    }
+                    ui.weak("保存后会重启应用以使用新配置。");
+                });
 
             ui.add_space(8.0);
             ui.separator();

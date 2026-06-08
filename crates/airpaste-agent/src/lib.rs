@@ -17,9 +17,9 @@ use crate::{
     identity::DeviceIdentity,
     paste::PasteSimulator,
     peer::{run_peer_server, PeerFileRegistry},
-    state_file::{AgentState, StateFile},
 };
-pub use crate::config::{Args, ClipboardMode};
+pub use crate::config::{app_support_dir, Args, ClipboardMode, DEFAULT_SERVER_URL};
+pub use crate::state_file::{AgentState, StateFile};
 use airpaste_core::{
     BlobRef, ClipId, ClipKind, DeviceId, EncryptionInfo, FileClip, FileEntry, FileEntryKind,
     TextClip, TransferToken,
