@@ -114,6 +114,8 @@ struct TrayApp {
     // Once connected, the one-shot pair code is cleared from the saved config (reusing a
     // consumed code is a hard error on the next connect). Done once per launch.
     pair_code_cleared: bool,
+    // Cached "start at login" state (read once; refreshed when the checkbox is toggled).
+    autostart: bool,
 }
 
 /// Install a CJK-capable font as the primary UI font so Chinese text renders (egui's default
@@ -174,6 +176,7 @@ impl TrayApp {
             auth_token_input: settings.auth_token,
             pair_code_input: settings.pair_code,
             pair_code_cleared: false,
+            autostart: crate::autostart::is_autostart_enabled(),
         }
     }
 
@@ -296,6 +299,14 @@ impl eframe::App for TrayApp {
                 .changed()
             {
                 self.agent.set_isolated(isolated);
+            }
+
+            let mut autostart = self.autostart;
+            if ui.checkbox(&mut autostart, "开机自启").changed() {
+                match crate::autostart::set_autostart(autostart) {
+                    Ok(()) => self.autostart = crate::autostart::is_autostart_enabled(),
+                    Err(error) => eprintln!("airpaste-tray: failed to set autostart: {error}"),
+                }
             }
 
             ui.add_space(6.0);
