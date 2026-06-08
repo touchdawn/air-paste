@@ -35,7 +35,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -88,13 +88,24 @@ struct TextPublishPolicy {
     max_text_clip_bytes: usize,
 }
 
+/// Monotonic arrival counter so the isolated-mode `Ctrl+Shift+V` can paste whichever channel
+/// (text inbox vs pending files) arrived most recently.
+static CLIP_ARRIVAL_SEQ: AtomicU64 = AtomicU64::new(0);
+fn next_arrival_seq() -> u64 {
+    CLIP_ARRIVAL_SEQ.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 /// Clipboard integration mode plus the isolated-mode inbox (recent remote texts held in-app
-/// instead of being written to the system clipboard, newest first).
+/// instead of being written to the system clipboard, newest first) and arrival markers used to
+/// pick text-vs-files by recency.
 #[derive(Clone)]
 struct ClipboardCtx {
     // Shared so the tray UI can flip the mode at runtime; read live on every poll/apply.
     isolated: Arc<AtomicBool>,
     inbox: Arc<Mutex<VecDeque<String>>>,
+    // Arrival sequence of the latest isolated inbox text and the latest pending file clip.
+    inbox_seq: Arc<AtomicU64>,
+    file_seq: Arc<AtomicU64>,
 }
 
 impl ClipboardCtx {
@@ -106,6 +117,14 @@ impl ClipboardCtx {
 /// How many recent isolated-inbox texts to retain for the UI history.
 const INBOX_HISTORY_MAX: usize = 20;
 
+/// A summary of remote files waiting to be applied (downloaded on `Ctrl+Shift+V`), for the UI.
+#[derive(Clone, Debug)]
+pub struct PendingFiles {
+    pub count: usize,
+    pub total_size: u64,
+    pub names: Vec<String>,
+}
+
 /// Shared, observable agent state for embedders (the tray UI). Updated by the running agent.
 pub struct AgentShared {
     inbox: Arc<Mutex<VecDeque<String>>>,
@@ -115,6 +134,12 @@ pub struct AgentShared {
     isolated: Arc<AtomicBool>,
     // Last fatal error from the embedded agent (e.g. registration failed), surfaced in the UI.
     last_error: std::sync::Mutex<Option<String>>,
+    // The latest remote file clip waiting to be applied (shared with the running agent so the
+    // UI observes it for free). Cleared once the files are applied.
+    pending_files: Arc<Mutex<Option<PendingFileClip>>>,
+    // Arrival sequence of the latest inbox text / pending files (for recency-based paste).
+    inbox_seq: Arc<AtomicU64>,
+    file_seq: Arc<AtomicU64>,
 }
 
 impl AgentShared {
@@ -128,6 +153,9 @@ impl AgentShared {
                 args.clipboard_mode == ClipboardMode::Isolated,
             )),
             last_error: std::sync::Mutex::new(None),
+            pending_files: Arc::new(Mutex::new(None)),
+            inbox_seq: Arc::new(AtomicU64::new(0)),
+            file_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -184,6 +212,24 @@ impl AgentHandle {
     /// The last fatal error from the embedded agent (e.g. failed to register), if any.
     pub fn last_error(&self) -> Option<String> {
         self.shared.last_error.lock().unwrap().clone()
+    }
+
+    /// Remote files waiting to be applied (via `Ctrl+Shift+V`), if any. Present in both clipboard
+    /// modes; in isolated mode they coexist with the text inbox and the more recent one wins.
+    pub fn pending_files(&self) -> Option<PendingFiles> {
+        let guard = self.shared.pending_files.try_lock().ok()?;
+        let pending = guard.as_ref()?;
+        let names = pending
+            .file_clip
+            .files
+            .iter()
+            .map(|entry| entry.relative_path.clone())
+            .collect();
+        Some(PendingFiles {
+            count: pending.file_clip.files.len(),
+            total_size: pending.file_clip.total_size,
+            names,
+        })
     }
 }
 
@@ -358,6 +404,8 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     let clip_ctx = ClipboardCtx {
         isolated: shared.isolated.clone(),
         inbox: shared.inbox.clone(),
+        inbox_seq: shared.inbox_seq.clone(),
+        file_seq: shared.file_seq.clone(),
     };
     if clip_ctx.is_isolated() {
         tracing::info!("clipboard isolated mode: Ctrl+Shift+C pushes the selection, Ctrl+Shift+V pastes from AirPaste");
@@ -370,7 +418,8 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     }
     let last_local_write = Arc::new(Mutex::new(None::<String>));
     let last_local_file_write = Arc::new(Mutex::new(None::<String>));
-    let pending_file_clip = Arc::new(Mutex::new(None::<PendingFileClip>));
+    // Shared with the UI so it can show files waiting to be applied.
+    let pending_file_clip = shared.pending_files.clone();
     let peer_registry = PeerFileRegistry::default();
     let peer_public_url = args
         .peer_public_url
@@ -1519,6 +1568,7 @@ async fn handle_server_event(
                             inbox.push_front(text);
                             inbox.truncate(INBOX_HISTORY_MAX);
                         }
+                        clip_ctx.inbox_seq.store(next_arrival_seq(), Ordering::Relaxed);
                         tracing::info!("stored remote text in isolated inbox");
                     } else {
                         clipboard.set_text(&text)?;
@@ -1552,6 +1602,7 @@ async fn handle_server_event(
                 source_device_id: pending_source_device_id,
                 file_clip,
             });
+            clip_ctx.file_seq.store(next_arrival_seq(), Ordering::Relaxed);
             if auto_apply_files {
                 apply_pending_file_clip(
                     client,
@@ -1607,8 +1658,9 @@ async fn handle_server_event(
     Ok(())
 }
 
-/// Ctrl+Shift+V dispatch. In isolated mode, paste the inbox text (zero-touch) when present;
-/// otherwise fall back to the file-paste flow. In system mode, run the file-paste flow.
+/// Ctrl+Shift+V dispatch. In isolated mode, paste whichever channel arrived most recently — the
+/// inbox text (zero-touch) or the pending remote files — falling back to the other if the chosen
+/// one is empty. In system mode, run the file-paste flow.
 #[allow(clippy::too_many_arguments)]
 async fn paste_remote_via_hotkey(
     clip_ctx: &ClipboardCtx,
@@ -1626,8 +1678,15 @@ async fn paste_remote_via_hotkey(
     paste_after_apply: bool,
     cache_dir: &Path,
 ) -> anyhow::Result<()> {
-    if clip_ctx.is_isolated() && paste_inbox_text(&clip_ctx.inbox, clipboard, paste).await? {
-        return Ok(());
+    if clip_ctx.is_isolated() {
+        let files_newer = clip_ctx.file_seq.load(Ordering::Relaxed)
+            > clip_ctx.inbox_seq.load(Ordering::Relaxed)
+            && pending_file_clip.lock().await.is_some();
+        // Unless files arrived more recently, try the text inbox first; an empty inbox returns
+        // false so we fall through to the files below.
+        if !files_newer && paste_inbox_text(&clip_ctx.inbox, clipboard, paste).await? {
+            return Ok(());
+        }
     }
     apply_pending_file_clip(
         client,
