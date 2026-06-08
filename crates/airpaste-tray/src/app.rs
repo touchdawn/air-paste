@@ -343,6 +343,44 @@ impl eframe::App for TrayApp {
                         self.save_and_reconnect();
                     }
                     ui.weak("保存后会重启应用以使用新配置。");
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label("给新设备配对:");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(self.agent.connected(), egui::Button::new("生成配对码"))
+                            .clicked()
+                        {
+                            self.agent.generate_pair_code();
+                        }
+                        if !self.agent.connected() {
+                            ui.weak("(需先连接)");
+                        }
+                    });
+                    if let Some(result) = self.agent.pair_code() {
+                        match result {
+                            Ok(code) => {
+                                ui.horizontal(|ui| {
+                                    ui.monospace(&code);
+                                    if ui.button("复制").clicked() {
+                                        ctx.copy_text(code.clone());
+                                    }
+                                    if ui.button("清除").clicked() {
+                                        self.agent.clear_pair_code();
+                                    }
+                                });
+                                ui.weak("在新设备的「配对码」里填入此码并连接(10 分钟内有效)。");
+                            }
+                            Err(error) => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(0xd9, 0x3a, 0x3a),
+                                    format!("生成失败:{}", preview(&error)),
+                                );
+                            }
+                        }
+                    }
                 });
 
             if let Some(progress) = self.agent.transfer_progress() {

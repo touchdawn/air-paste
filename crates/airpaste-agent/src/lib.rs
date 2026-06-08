@@ -166,6 +166,13 @@ pub struct AgentShared {
     // Arrival sequence of the latest inbox text / pending files (for recency-based paste).
     inbox_seq: Arc<AtomicU64>,
     file_seq: Arc<AtomicU64>,
+    // The Tokio runtime the agent runs on, so the UI can launch async actions (pair code).
+    runtime: tokio::runtime::Handle,
+    // The connected client + this device id, published once registration succeeds, so the UI
+    // can mint a pairing code without the CLI.
+    client: std::sync::Mutex<Option<(ServerClient, DeviceId)>>,
+    // Latest UI-requested pair code: Ok(code) / Ok("生成中…") / Err(reason).
+    pair_code: std::sync::Mutex<Option<Result<String, String>>>,
 }
 
 impl AgentShared {
@@ -182,6 +189,10 @@ impl AgentShared {
             pending_files: Arc::new(Mutex::new(None)),
             inbox_seq: Arc::new(AtomicU64::new(0)),
             file_seq: Arc::new(AtomicU64::new(0)),
+            // Both callers (spawn_embedded / run_cli) construct this from within a Tokio runtime.
+            runtime: tokio::runtime::Handle::current(),
+            client: std::sync::Mutex::new(None),
+            pair_code: std::sync::Mutex::new(None),
         }
     }
 }
@@ -261,6 +272,35 @@ impl AgentHandle {
     /// Live progress of the current file download, if one is running.
     pub fn transfer_progress(&self) -> Option<TransferProgress> {
         TRANSFER_PROGRESS.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    /// Mint a pairing code for another device (only this device must be trusted). Non-blocking:
+    /// the result lands in `pair_code()`. Requires an active connection.
+    pub fn generate_pair_code(&self) {
+        let snapshot = self.shared.client.lock().unwrap().clone();
+        let Some((client, device_id)) = snapshot else {
+            *self.shared.pair_code.lock().unwrap() = Some(Err("尚未连接".to_string()));
+            return;
+        };
+        *self.shared.pair_code.lock().unwrap() = Some(Ok("生成中…".to_string()));
+        let shared = self.shared.clone();
+        self.shared.runtime.spawn(async move {
+            let entry = match client.start_pairing(device_id, Some(600)).await {
+                Ok(response) => Ok(response.code.0),
+                Err(error) => Err(format!("{error:#}")),
+            };
+            *shared.pair_code.lock().unwrap() = Some(entry);
+        });
+    }
+
+    /// The latest pair code the UI requested: `Ok(code)` (or "生成中…") / `Err(reason)`.
+    pub fn pair_code(&self) -> Option<Result<String, String>> {
+        self.shared.pair_code.lock().unwrap().clone()
+    }
+
+    /// Dismiss the displayed pair code.
+    pub fn clear_pair_code(&self) {
+        *self.shared.pair_code.lock().unwrap() = None;
     }
 }
 
@@ -347,6 +387,9 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     client
         .set_request_identity(device_id.clone(), identity.clone())
         .await;
+    // Publish the signed client so the UI can mint a pairing code (this device is trusted once
+    // registered/paired; the server enforces trust on start_pairing).
+    *shared.client.lock().unwrap() = Some((client.clone(), device_id.clone()));
     if let Some(pair_code) = args
         .pair_code
         .clone()
