@@ -73,9 +73,11 @@ try {
     if ($LASTEXITCODE -ne 0 -or -not $pair.code) { throw "failed to create pair code" }
 
     # The thing under test: a tray-config.json with server + pair code, in an isolated APPDATA.
+    # Write WITHOUT a BOM — Set-Content -Encoding UTF8 on Windows PowerShell 5 adds one, and the
+    # app writes BOM-free JSON itself; the loader tolerates a BOM either way (see config.rs).
     $cfg = @{ server_url = $baseUrl; pair_code = $pair.code }
     if ($AuthToken) { $cfg.auth_token = $AuthToken }
-    ($cfg | ConvertTo-Json) | Set-Content -LiteralPath $cfgFile -Encoding UTF8
+    [System.IO.File]::WriteAllText($cfgFile, ($cfg | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Wrote $cfgFile"
 
     # Launch the tray with the overridden APPDATA and NO connection flags -> it must read config.

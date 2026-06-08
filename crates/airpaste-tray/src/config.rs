@@ -29,16 +29,29 @@ pub fn config_path() -> PathBuf {
 }
 
 impl TrayConfig {
-    /// Load the config, or a default (best-effort: a missing or malformed file yields defaults).
+    /// Load the config, or a default. A missing file yields defaults silently; a present but
+    /// malformed file logs and yields defaults (so the problem is at least visible).
     pub fn load() -> Self {
         let path = config_path();
-        if !path.exists() {
+        let Ok(body) = std::fs::read_to_string(&path) else {
             return Self::default();
+        };
+        match Self::parse(&body) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!(
+                    "airpaste-tray: ignoring malformed {}: {error}",
+                    path.display()
+                );
+                Self::default()
+            }
         }
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|body| serde_json::from_str(&body).ok())
-            .unwrap_or_default()
+    }
+
+    /// Parse config JSON, tolerating a leading UTF-8 BOM (editors/tools on Windows often write
+    /// one, and `serde_json` rejects it — which previously made a BOM'd config silently ignored).
+    fn parse(body: &str) -> serde_json::Result<Self> {
+        serde_json::from_str(body.trim_start_matches('\u{feff}'))
     }
 
     /// Persist the config (creating the directory if needed). Best-effort; errors are returned
@@ -51,5 +64,26 @@ impl TrayConfig {
         let body = serde_json::to_string_pretty(self)
             .unwrap_or_else(|_| "{}".to_string());
         std::fs::write(&path, body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_with_and_without_bom() {
+        let json = r#"{"server_url":"http://host:18092","pair_code":"ABC123"}"#;
+
+        let plain = TrayConfig::parse(json).expect("plain JSON parses");
+        assert_eq!(plain.server_url.as_deref(), Some("http://host:18092"));
+        assert_eq!(plain.pair_code.as_deref(), Some("ABC123"));
+
+        // A UTF-8 BOM (what Windows PowerShell 5's Set-Content -Encoding UTF8 writes) must not
+        // make the config silently ignored.
+        let with_bom = format!("\u{feff}{json}");
+        let bom = TrayConfig::parse(&with_bom).expect("BOM-prefixed JSON parses");
+        assert_eq!(bom.server_url.as_deref(), Some("http://host:18092"));
+        assert_eq!(bom.pair_code.as_deref(), Some("ABC123"));
     }
 }
