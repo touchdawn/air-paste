@@ -65,6 +65,10 @@ const HOTKEY_MODIFIER_RELEASE: Duration = Duration::from_millis(120);
 /// Polling for the result of a synthetic copy (the OS populates the clipboard async).
 const COPY_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const COPY_POLL_ATTEMPTS: usize = 15;
+/// Written to the clipboard right before a synthetic copy so we can distinguish a real capture
+/// from "the copy did nothing"; uses zero-width separators so it never collides with a real
+/// selection.
+const COPY_SENTINEL: &str = "\u{2063}airpaste-copy-sentinel\u{2063}";
 
 #[derive(Clone)]
 struct FileTransferPolicy {
@@ -1815,15 +1819,29 @@ async fn copy_selection_to_airpaste(
     text_clip_ttl_secs: u64,
 ) -> anyhow::Result<()> {
     let saved = clipboard.get_text().ok().flatten();
-    // Let the triggering Ctrl+Shift release so the synthetic Cmd+C is a clean copy.
+    // Let the triggering Ctrl+Shift release so the synthetic copy is a clean Ctrl/Cmd+C.
     tokio::time::sleep(HOTKEY_MODIFIER_RELEASE).await;
+    // Overwrite the clipboard with a sentinel BEFORE the synthetic copy, so we can tell a real
+    // capture (clipboard became some other non-empty text) from "the copy did nothing" (still
+    // the sentinel). Without this, a failed/slow synthetic copy would republish whatever was on
+    // the clipboard (e.g. a pairing code the user had just copied).
+    let _ = clipboard.set_text(COPY_SENTINEL);
     paste.copy()?;
-    let selection = read_after_copy(clipboard, saved.as_deref()).await;
-    if let Some(previous) = &saved {
-        let _ = clipboard.set_text(previous);
+    let selection = read_after_copy(clipboard).await;
+    // Restore the user's original clipboard (or clear our sentinel if there was nothing).
+    match &saved {
+        Some(previous) => {
+            let _ = clipboard.set_text(previous);
+        }
+        None => {
+            let _ = clipboard.set_text("");
+        }
     }
     let Some(text) = selection else {
-        tracing::warn!("Ctrl+Shift+C captured no text selection");
+        tracing::warn!(
+            "Ctrl+Shift+C captured no text selection (select text in a normal app first; over \
+             RDP the clipboard can lag several seconds)"
+        );
         return Ok(());
     };
     if text.trim().is_empty() {
@@ -1834,18 +1852,19 @@ async fn copy_selection_to_airpaste(
     Ok(())
 }
 
-/// Poll the clipboard briefly for the result of a synthetic copy, returning the captured
-/// text once it differs from `previous` (or whatever is present after the timeout).
-async fn read_after_copy(clipboard: &Clipboard, previous: Option<&str>) -> Option<String> {
+/// Poll the clipboard for the result of a synthetic copy. Returns the captured text once the
+/// clipboard holds some non-empty value other than our pre-copy sentinel; returns `None` if it
+/// stays the sentinel (the copy captured nothing) so the caller does not republish stale text.
+async fn read_after_copy(clipboard: &Clipboard) -> Option<String> {
     for _ in 0..COPY_POLL_ATTEMPTS {
         tokio::time::sleep(COPY_POLL_INTERVAL).await;
         if let Ok(Some(text)) = clipboard.get_text() {
-            if !text.is_empty() && Some(text.as_str()) != previous {
+            if !text.is_empty() && text != COPY_SENTINEL {
                 return Some(text);
             }
         }
     }
-    clipboard.get_text().ok().flatten()
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
