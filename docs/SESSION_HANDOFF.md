@@ -551,8 +551,11 @@ Security and trust:
 Transfer:
 
 - Peer file server streams file responses from disk instead of buffering entire files in memory.
-- Directories are represented in the manifest but skipped by transfer.
-- There is no recursive directory copy.
+- Directories now transfer recursively: a dropped folder is walked into one `File` entry per
+  file with a structured `relative_path`, and the receiver rebuilds the tree under the cache dir
+  (`safe_cache_path` drops `.`/`..`/empty components so it can never escape the cache). Empty
+  directories and symlinks are not copied. See `collect_publish_files`/`walk_publish_dir` and the
+  `safe_cache_path` traversal-safety unit test in `crates/airpaste-agent/src/lib.rs`.
 - There is no resume, explicit chunk protocol, or transfer progress.
 - The relay data path is implemented (E2EE, server-forwarded). The receiver falls back to relay automatically when a direct/LAN download errors, and `--prefer-relay true` forces it. The fallback is now incremental and survives partial direct transfers: only still-missing indexes are pulled over the relay, and a source index is committed against its one-time grant only after the bytes finish streaming (a failed stream releases it), so a mid-transfer direct failure is completed over the relay instead of hitting `410 already served`. Residual edge: if the source finishes pushing an index's bytes but the recipient never receives the tail, that index is committed and a relay retry of *that* index would still see it served (no app-level delivery ACK yet); the partial fallback covers the common connect/mid-stream failures.
 - The server relay forwards frames in memory with a **bounded** per-direction queue (`RELAY_QUEUE_CAPACITY` frames, backpressured via split read/write tasks so neither direction deadlocks) and enforces the session byte budget plus the session TTL **mid-connection** (a `tokio::time::sleep` deadline tears the relay down at `expires_at`). The recipient's 30s receive timeout and source's 60s idle timeout still bound shorter stalls.
@@ -604,8 +607,9 @@ make the source unreachable or pass `--prefer-relay`) before relying on it.
 
 ### 3. Improve the file data plane
 
-- Add directory walking with file count and total-size caps (directories are currently
-  announced in the manifest but skipped by transfer).
+- ~~Add directory walking with file count and total-size caps.~~ Done: folders transfer
+  recursively (structure preserved, traversal-safe receive). See "Transfer" under MVP
+  Limitations. Remaining here: copy empty directories / symlinks if it matters.
 - Add transfer progress / resume.
 
 ### 3b. Finish isolated clipboard mode
