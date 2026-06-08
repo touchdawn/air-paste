@@ -556,7 +556,10 @@ Transfer:
   (`safe_cache_path` drops `.`/`..`/empty components so it can never escape the cache). Empty
   directories and symlinks are not copied. See `collect_publish_files`/`walk_publish_dir` and the
   `safe_cache_path` traversal-safety unit test in `crates/airpaste-agent/src/lib.rs`.
-- There is no resume, explicit chunk protocol, or transfer progress.
+- There is no resume or explicit chunk protocol. Per-file transfer **progress** now exists: a
+  process-global `TransferProgress` (done/total/current) is updated in the direct and relay
+  download loops and surfaced via `AgentHandle::transfer_progress()` (tray shows a progress bar);
+  the download logs carry `progress=N/total`.
 - The relay data path is implemented (E2EE, server-forwarded). The receiver falls back to relay automatically when a direct/LAN download errors, and `--prefer-relay true` forces it. The fallback is now incremental and survives partial direct transfers: only still-missing indexes are pulled over the relay, and a source index is committed against its one-time grant only after the bytes finish streaming (a failed stream releases it), so a mid-transfer direct failure is completed over the relay instead of hitting `410 already served`. Residual edge: if the source finishes pushing an index's bytes but the recipient never receives the tail, that index is committed and a relay retry of *that* index would still see it served (no app-level delivery ACK yet); the partial fallback covers the common connect/mid-stream failures.
 - The server relay forwards frames in memory with a **bounded** per-direction queue (`RELAY_QUEUE_CAPACITY` frames, backpressured via split read/write tasks so neither direction deadlocks) and enforces the session byte budget plus the session TTL **mid-connection** (a `tokio::time::sleep` deadline tears the relay down at `expires_at`). The recipient's 30s receive timeout and source's 60s idle timeout still bound shorter stalls.
 
@@ -564,7 +567,10 @@ Platform:
 
 - Windows supports clipboard text, file drop lists, `Ctrl+Shift+V`, and synthetic copy/paste.
 - macOS supports clipboard text, file URL read/write, `Ctrl+Shift+V`, one-shot file apply, and now synthetic copy/paste via CoreGraphics `CGEvent` (used by isolated mode; requires Accessibility permission). The file-paste flow on macOS still does not auto-`Cmd+V` after apply (`REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY` is false on macOS); only isolated-mode text paste synthesizes the keystroke so far.
-- Isolated clipboard mode is text-only; file clips still use the system clipboard / pending-download flow.
+- Isolated clipboard mode now covers files too: a remote file clip is held as pending (not
+  auto-applied), and `Ctrl+Shift+V` applies whichever channel — inbox text or pending files —
+  arrived most recently (arrival-sequence based). The tray shows pending files
+  (`AgentHandle::pending_files()`).
 - The macOS synthetic copy/paste has been verified on real macOS hardware (Ctrl+Shift+V and Ctrl+Shift+C into TextEdit, system clipboard preserved) with Accessibility granted to the launching app. Windows synthetic copy/paste (SendInput) is compiled but not yet exercised on a real Windows session.
 - The tray/menu-bar UI (`airpaste-tray`) runs on macOS and Windows; no settings UI, installer,
   or service/login-item/autostart packaging yet.
@@ -610,7 +616,7 @@ make the source unreachable or pass `--prefer-relay`) before relying on it.
 - ~~Add directory walking with file count and total-size caps.~~ Done: folders transfer
   recursively (structure preserved, traversal-safe receive). See "Transfer" under MVP
   Limitations. Remaining here: copy empty directories / symlinks if it matters.
-- Add transfer progress / resume.
+- ~~Add transfer progress.~~ Done (see "Transfer" above). Resume / chunk protocol still open.
 
 ### 3b. Finish isolated clipboard mode
 
@@ -618,8 +624,9 @@ make the source unreachable or pass `--prefer-relay`) before relying on it.
   leak fixed via `HOTKEY_MODIFIER_RELEASE`). Still TODO: verify the same on a real **Windows**
   session, and confirm the save/restore timing is reliable across more apps (browsers,
   Electron) beyond TextEdit.
-- Extend isolated mode to files (currently text-only): the inbox would need to hold the latest
-  pending file clip and `Ctrl+Shift+V` choose between text/files by recency.
+- ~~Extend isolated mode to files.~~ Done: a pending file clip is held and `Ctrl+Shift+V` picks
+  text vs files by arrival recency; the tray shows pending files. Verify the hotkey choice on a
+  real session.
 - Consider a small inbox history (latest N) and a way to pick which entry to paste.
 
 ### 3c. Menu-bar UI (`airpaste-tray`)
