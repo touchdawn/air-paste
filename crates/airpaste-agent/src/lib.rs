@@ -32,7 +32,7 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -88,13 +88,13 @@ struct TextPublishPolicy {
     max_text_clip_bytes: usize,
 }
 
-/// Clipboard integration mode plus the isolated-mode inbox (latest remote text held in-app
-/// instead of being written to the system clipboard).
+/// Clipboard integration mode plus the isolated-mode inbox (recent remote texts held in-app
+/// instead of being written to the system clipboard, newest first).
 #[derive(Clone)]
 struct ClipboardCtx {
     // Shared so the tray UI can flip the mode at runtime; read live on every poll/apply.
     isolated: Arc<AtomicBool>,
-    inbox: Arc<Mutex<Option<String>>>,
+    inbox: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl ClipboardCtx {
@@ -103,25 +103,31 @@ impl ClipboardCtx {
     }
 }
 
+/// How many recent isolated-inbox texts to retain for the UI history.
+const INBOX_HISTORY_MAX: usize = 20;
+
 /// Shared, observable agent state for embedders (the tray UI). Updated by the running agent.
 pub struct AgentShared {
-    inbox: Arc<Mutex<Option<String>>>,
+    inbox: Arc<Mutex<VecDeque<String>>>,
     connected: AtomicBool,
     device_name: std::sync::Mutex<String>,
     device_id: std::sync::Mutex<Option<String>>,
     isolated: Arc<AtomicBool>,
+    // Last fatal error from the embedded agent (e.g. registration failed), surfaced in the UI.
+    last_error: std::sync::Mutex<Option<String>>,
 }
 
 impl AgentShared {
     fn new(args: &Args) -> Self {
         Self {
-            inbox: Arc::new(Mutex::new(None)),
+            inbox: Arc::new(Mutex::new(VecDeque::new())),
             connected: AtomicBool::new(false),
             device_name: std::sync::Mutex::new(args.device_name()),
             device_id: std::sync::Mutex::new(None),
             isolated: Arc::new(AtomicBool::new(
                 args.clipboard_mode == ClipboardMode::Isolated,
             )),
+            last_error: std::sync::Mutex::new(None),
         }
     }
 }
@@ -157,13 +163,27 @@ impl AgentHandle {
         self.shared.isolated.store(value, Ordering::Relaxed);
     }
 
-    /// The latest remote text held in the isolated-mode inbox, if any.
+    /// The most recent remote text held in the isolated-mode inbox, if any.
     pub fn latest_inbox(&self) -> Option<String> {
         self.shared
             .inbox
             .try_lock()
             .ok()
-            .and_then(|guard| guard.clone())
+            .and_then(|guard| guard.front().cloned())
+    }
+
+    /// Recent isolated-mode inbox texts, newest first (up to `INBOX_HISTORY_MAX`).
+    pub fn inbox_history(&self) -> Vec<String> {
+        self.shared
+            .inbox
+            .try_lock()
+            .map(|guard| guard.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The last fatal error from the embedded agent (e.g. failed to register), if any.
+    pub fn last_error(&self) -> Option<String> {
+        self.shared.last_error.lock().unwrap().clone()
     }
 }
 
@@ -203,8 +223,9 @@ pub fn spawn_embedded(args: Args) -> AgentHandle {
         shared: shared.clone(),
     };
     tokio::spawn(async move {
-        if let Err(error) = run(args, shared).await {
+        if let Err(error) = run(args, shared.clone()).await {
             tracing::error!(%error, "embedded agent stopped");
+            *shared.last_error.lock().unwrap() = Some(format!("{error:#}"));
         }
     });
     handle
@@ -1379,9 +1400,14 @@ async fn handle_server_event(
             match decrypt_remote_text(&text_clip, &clip.encryption, device_id, encryption) {
                 Ok(Some(text)) => {
                     if clip_ctx.is_isolated() {
-                        // Isolated mode: keep the text in the in-app inbox; the system
-                        // clipboard is left untouched until the user presses Ctrl+Shift+V.
-                        *clip_ctx.inbox.lock().await = Some(text);
+                        // Isolated mode: keep the text in the in-app inbox (newest first,
+                        // bounded history); the system clipboard is left untouched until the
+                        // user presses Ctrl+Shift+V.
+                        {
+                            let mut inbox = clip_ctx.inbox.lock().await;
+                            inbox.push_front(text);
+                            inbox.truncate(INBOX_HISTORY_MAX);
+                        }
                         tracing::info!("stored remote text in isolated inbox");
                     } else {
                         clipboard.set_text(&text)?;
@@ -1515,11 +1541,12 @@ async fn paste_remote_via_hotkey(
 /// clipboard: save the current clipboard, set ours, synthesize paste, then restore. Returns
 /// `false` (no-op) when the inbox is empty so the caller can fall back to files.
 async fn paste_inbox_text(
-    inbox: &Mutex<Option<String>>,
+    inbox: &Mutex<VecDeque<String>>,
     clipboard: &Clipboard,
     paste: &PasteSimulator,
 ) -> anyhow::Result<bool> {
-    let Some(text) = inbox.lock().await.clone() else {
+    // Paste the most recent inbox entry (newest first).
+    let Some(text) = inbox.lock().await.front().cloned() else {
         return Ok(false);
     };
     let saved = clipboard.get_text().ok().flatten();
