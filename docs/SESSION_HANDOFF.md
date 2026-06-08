@@ -1,6 +1,6 @@
 # Air Paste Handoff
 
-Last updated: 2026-06-07
+Last updated: 2026-06-08
 
 This document is for the next coding session. It summarizes the current repo state, what is already working, what is intentionally still MVP-grade, and the recommended next steps.
 
@@ -27,7 +27,7 @@ order:
 6. **Encrypted relay data path** (`GET /v1/relay/{session_id}/ws`) with automatic
    direct->relay fallback, plus network-loss hardening (reconnect backoff, connect/receive
    timeouts) and resilient clipboard polling.
-7. **Relay/fallback hardening** (this session, working tree — not yet committed):
+7. **Relay/fallback hardening** (commit `593bb03`):
    - Source file grants are now **commit-on-complete**: an index is only consumed against
      the one-time grant after its bytes finish streaming; a failed/aborted transfer
      **releases** it for retry. The direct HTTP path uses a streaming drop-guard
@@ -38,7 +38,7 @@ order:
    - The server relay now uses **bounded, backpressured** per-direction queues (split
      read/write tasks, no deadlock, no frame drops) and **enforces the session TTL
      mid-connection**, not just at connect.
-8. **Isolated clipboard mode** (this session, working tree — not yet committed): a new
+8. **Isolated clipboard mode** (commit `593bb03`): a new
    `--clipboard-mode isolated` keeps the AirPaste text channel separate from the system
    clipboard. Remote text lands in an in-app inbox (the system clipboard is never
    auto-overwritten); `Ctrl+Shift+C` captures the current selection into AirPaste and
@@ -48,10 +48,31 @@ order:
    `crates/airpaste-agent/src/paste/macos.rs`). Text-only for now; files keep the existing
    flow. See "Isolated Clipboard Mode" below.
 
-Recent commits (newest first): `84d33af` relay fallback + resilient polling, `a681f98`
-relay data path + hardening, `830e954` mDNS, `e64d9a0` LAN validation notes, `e1ed3d1`
-text E2EE, `f894c26` cross-compile helper, `925d05d` provider-token filter. (The item-7
-relay/fallback hardening above is uncommitted working-tree changes.)
+### What changed in the 2026-06-08 session
+
+Committed the previous session's work, validated it on the real Windows agent, and built a
+macOS menu-bar UI:
+
+9. **Windows validation + fixes**: ran the agent build/tests/smokes on the real Windows GNU
+   toolchain. Fixed `smoke-agent.ps1` (it compared `encrypted_inline_body` to plaintext —
+   stale since text E2EE); switched agent logging to **stderr** (block-buffered stdout never
+   flushed for a long-running agent redirected to a file on Windows); pinned `RUST_LOG` in the
+   log-grepping smokes. Added Windows smokes `smoke-isolated.ps1` (inbound isolation) and the
+   interactive `smoke-isolated-hotkey.ps1`. Confirmed on Windows: build, unit tests,
+   system-mode sync, isolated inbound, and `Ctrl+Shift+V/C`. (RDP `rdpclip` adds seconds of
+   clipboard latency — an environment limitation; see "Windows / RDP validation".)
+10. **macOS menu-bar UI** (`crates/airpaste-tray`, egui/eframe + tray-icon): extracted the
+    agent into the `airpaste_agent` library (`spawn_embedded` + `AgentHandle`) and built a
+    menu-bar app that embeds it — Chinese UI (CJK font), menu-bar-only (accessory app,
+    close-to-hide), live status + inbox + "copy", and a runtime isolated-mode toggle. Verified
+    end-to-end on macOS (connects, isolated inbox populates). See "Menu-bar UI".
+
+Recent commits (newest first): `fe3eaf2` tray UI docs, `e766fd3` runtime isolated toggle,
+`33cdc5d` menu-bar-only, `abdc979` CJK/Chinese UI, `a833880` tray↔agent wiring, `46788ce`
+agent→library refactor, `d85bfc0` tray scaffold; `0d3fd31` Windows/RDP validation notes,
+`5944f53` Windows hotkey harness, `a382b28` pin RUST_LOG, `6e16882` log to stderr, `7d7bf5f`
+Windows isolated smoke, `0bf080d` fix Windows smoke for E2EE; `593bb03` relay/fallback
+hardening + isolated clipboard mode; `4f1feb6` prior handoff.
 
 The workspace currently contains:
 
