@@ -66,8 +66,21 @@ macOS menu-bar UI:
     menu-bar app that embeds it — Chinese UI (CJK font), menu-bar-only (accessory app,
     close-to-hide), live status + inbox + "copy", and a runtime isolated-mode toggle. Verified
     end-to-end on macOS (connects, isolated inbox populates). See "Menu-bar UI".
+11. **Windows tray UI** (`crates/airpaste-tray` is now cross-platform): first verified that
+    eframe's default glow/OpenGL backend + tray-icon cross-compile to `x86_64-pc-windows-gnu`
+    (cargo check AND a full mingw-w64 link build on macOS — no wgpu fallback needed). Then split
+    the crate into a shared egui `App`/`run()` (`app.rs`) and per-OS bits (`platform.rs`): CJK
+    font path (`C:\Windows\Fonts\msyh.ttc` Microsoft YaHei on Windows) and the tray-only window
+    policy (macOS Accessory activation; Windows `with_taskbar(false)` → winit skip-taskbar).
+    Added `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` so release builds
+    are truly tray-only. **Verified on the real Windows GNU host** (release build): links cleanly
+    on the WinLibs toolchain, the window renders Chinese (微软雅黑), no console window, no taskbar
+    button, and the tray icon is present. Remaining: the tray right-click menu (显示/退出) was not
+    reliably click-tested this round (test-harness click-targeting issue, not a code one — the
+    menu code is shared with the verified macOS path). See "Menu-bar UI".
 
-Recent commits (newest first): `fe3eaf2` tray UI docs, `e766fd3` runtime isolated toggle,
+Recent commits (newest first): `83fd0f2` Windows tray: hide console in release,
+`3703107` cross-platform tray (macOS + Windows); `fe3eaf2` tray UI docs, `e766fd3` runtime isolated toggle,
 `33cdc5d` menu-bar-only, `abdc979` CJK/Chinese UI, `a833880` tray↔agent wiring, `46788ce`
 agent→library refactor, `d85bfc0` tray scaffold; `0d3fd31` Windows/RDP validation notes,
 `5944f53` Windows hotkey harness, `a382b28` pin RUST_LOG, `6e16882` log to stderr, `7d7bf5f`
@@ -81,7 +94,7 @@ The workspace currently contains:
 - `crates/airpaste-crypto`: end-to-end content encryption (X25519 key agreement + XChaCha20-Poly1305 AEAD, per-clip content key wrapped per recipient).
 - `crates/airpaste-server`: Axum control-plane server using `redb`.
 - `crates/airpaste-agent`: lib + thin bin. The agent MVP (E2EE text sync, file manifest, peer file server, file download, remote paste hotkeys, Ed25519/X25519 identities) lives in the `airpaste_agent` library; `run_cli()` is the CLI entry and `spawn_embedded(args) -> AgentHandle` lets the tray run it in-process.
-- `crates/airpaste-tray`: macOS menu-bar UI (egui/eframe + tray-icon) that embeds the agent. macOS-only (GUI deps are gated to macOS so the workspace still cross-compiles to Windows).
+- `crates/airpaste-tray`: cross-platform menu-bar / tray UI (egui/eframe + tray-icon) that embeds the agent. A shared egui `App` + `run()` (`app.rs`) plus per-OS bits (`platform.rs`: CJK font path, tray-only window policy). Builds on macOS and Windows; cross-compiles to `x86_64-pc-windows-gnu` (eframe's default glow/OpenGL backend links under mingw-w64 — no wgpu needed).
 
 ## Toolchain Notes
 
@@ -124,7 +137,8 @@ Main commands:
 
 ```powershell
 cargo +stable-x86_64-pc-windows-gnu check
-cargo +stable-x86_64-pc-windows-gnu build -p airpaste-agent -p airpaste-server
+cargo +stable-x86_64-pc-windows-gnu build -p airpaste-agent -p airpaste-server -p airpaste-tray
+cargo +stable-x86_64-pc-windows-gnu build --release -p airpaste-tray   # tray-only (no console/taskbar)
 cargo +stable-x86_64-pc-windows-gnu test -p airpaste-agent
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1 -Bind 127.0.0.1:18082 -AuthToken airpaste-smoke-secret
@@ -422,10 +436,21 @@ redirection in mstsc (Local Resources -> uncheck Clipboard) and retest.
 
 ## Menu-bar UI (`airpaste-tray`)
 
-A macOS menu-bar app (egui/eframe window + `tray-icon` menu) that embeds the agent. The
-agent was extracted into the `airpaste_agent` library: `spawn_embedded(args)` starts it on a
-background Tokio runtime and returns an `AgentHandle` the UI polls for connection state,
-device id/name, clipboard mode, and the latest isolated-mode inbox text.
+A cross-platform menu-bar / tray app (egui/eframe window + `tray-icon` menu) that embeds the
+agent, running on **both macOS and Windows**. The agent was extracted into the `airpaste_agent`
+library: `spawn_embedded(args)` starts it on a background Tokio runtime and returns an
+`AgentHandle` the UI polls for connection state, device id/name, clipboard mode, and the latest
+isolated-mode inbox text.
+
+The crate is split into a shared egui `App` + `run()` (`src/app.rs`, identical on both OSes)
+and the per-OS bits (`src/platform.rs`): the CJK font path (macOS system fonts vs Windows
+`C:\Windows\Fonts\msyh.ttc` Microsoft YaHei) and the tray-only window policy (macOS `Accessory`
+activation via winit; Windows `ViewportBuilder::with_taskbar(false)`, which egui maps to winit
+`skip_taskbar`). `main.rs` is a thin entry that calls `app::run()` on every platform, plus
+`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` to drop the console window
+in Windows release builds (a console-subsystem exe otherwise gets its own taskbar button).
+`winit` stays a macOS-only direct dependency (only the `Accessory` hook needs it); the GUI deps
+(`eframe`, `tray-icon`, `tokio`, `airpaste-agent`) build on all platforms.
 
 Run it (accepts the same flags as the agent):
 
@@ -451,17 +476,27 @@ Implemented:
   text behaviour toggles live, but the `Ctrl+Shift+C` hotkey is only registered if the agent
   *started* isolated (hotkeys cannot be re-registered after launch).
 
-Architecture: eframe owns the macOS main-thread event loop; the agent runs on a background
+Architecture: eframe owns the platform main-thread event loop; the agent runs on a background
 Tokio runtime; the tray polls `AgentHandle` and `MenuEvent` each frame (200ms cadence).
 
 Verified on macOS: the embedded agent registers, upgrades the control WebSocket (101), and
 runs isolated mode with the global hotkeys; the font atlas + accessory mode launch without
-panics; `cargo check --workspace`, the unit tests, the three macOS smokes, and the Windows
-cross-compile are all unaffected (GUI deps gated to macOS).
+panics; `cargo check --workspace`, the unit tests, and the three macOS smokes all pass.
 
-Not done yet (UI follow-ups): pairing/config UI and inbox history (the `AgentHandle` control
-surface is currently just `set_isolated`); a real app icon (the menu-bar icon is a drawn
-disc); packaging as a `.app` / login item.
+Verified on the real Windows GNU host (2026-06-08, release build via the WinLibs toolchain):
+`cargo build --release -p airpaste-tray` links cleanly, the embedded agent starts (then logs
+`failed to register device` with no server, as expected), the egui window renders Chinese in
+微软雅黑 (no `no CJK font found` warning, so `C:\Windows\Fonts\msyh.ttc` loaded), there is no
+console window and no taskbar button (true tray-only), and the tray icon is present in the
+notification-area overflow. Not yet click-verified on Windows: the tray right-click menu
+(显示/退出) — the menu code is shared with the verified macOS path; the miss was a UI-automation
+click-targeting issue, not a code one.
+
+Not done yet (UI follow-ups): the tray right-click menu (显示/退出) and close-to-hide still need
+a reliable Windows click-test; pairing/config UI and inbox history (the `AgentHandle` control
+surface is currently just `set_isolated`); surfacing the agent's connection error in the UI
+(it currently sits at 连接中… when registration fails); a real app icon (the tray icon is a drawn
+disc); packaging as a `.app` (macOS) / `.exe` + autostart (Windows).
 
 ## Important MVP Limitations
 
@@ -489,7 +524,8 @@ Platform:
 - macOS supports clipboard text, file URL read/write, `Ctrl+Shift+V`, one-shot file apply, and now synthetic copy/paste via CoreGraphics `CGEvent` (used by isolated mode; requires Accessibility permission). The file-paste flow on macOS still does not auto-`Cmd+V` after apply (`REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY` is false on macOS); only isolated-mode text paste synthesizes the keystroke so far.
 - Isolated clipboard mode is text-only; file clips still use the system clipboard / pending-download flow.
 - The macOS synthetic copy/paste has been verified on real macOS hardware (Ctrl+Shift+V and Ctrl+Shift+C into TextEdit, system clipboard preserved) with Accessibility granted to the launching app. Windows synthetic copy/paste (SendInput) is compiled but not yet exercised on a real Windows session.
-- No tray UI, settings UI, installer, or service/login-item packaging yet.
+- The tray/menu-bar UI (`airpaste-tray`) runs on macOS and Windows; no settings UI, installer,
+  or service/login-item/autostart packaging yet.
 
 ## Recommended Next Steps
 
@@ -551,24 +587,20 @@ history (extend `AgentHandle`'s control surface beyond `set_isolated`); a real a
 package it as a `.app` / login item. A real-session pass to eyeball the Chinese rendering, the
 absent Dock icon, and the toggle is still worthwhile.
 
-### 3d. Windows UI (next planned task — built on macOS)
+### 3d. Windows UI — DONE (2026-06-08), minor click-test follow-up
 
-Bring the same tray UI to Windows. `crates/airpaste-tray` is currently macOS-only: GUI deps
-are gated under `[target.'cfg(target_os = "macos")'.dependencies]` and `main.rs` has a
-non-macOS stub. The agent is already a cross-platform library (`spawn_embedded` + `AgentHandle`).
-
-**Verify the gating risk FIRST, before writing any UI**: does the eframe + tray-icon stack
-cross-compile to `x86_64-pc-windows-gnu` from macOS? eframe's default `glow`/glutin (OpenGL)
-backend is the usual trouble spot on windows-gnu, and the Windows host has no MSVC (GNU only).
-Temporarily ungate the deps and run `cargo check --target x86_64-pc-windows-gnu -p airpaste-tray`
-(or extend `scripts/cross-windows.sh`). If `glow` fails, consider eframe's `wgpu` backend.
-
-If it cross-compiles: split `airpaste-tray` into a shared egui `App` + platform bits — font
-path (Windows: `C:\Windows\Fonts\msyh.ttc` / Microsoft YaHei), and the "no taskbar / minimize
-to tray" equivalent of the macOS accessory policy (winit has `WindowAttributesExtWindows`
-skip-taskbar; the macOS `ActivationPolicy` call must stay macOS-gated). Then ungate for both
-platforms, build on macOS via cross-compile, and run/verify on the real Windows machine via
-the parallel Windows agent (RDP).
+The same tray UI now runs on Windows. Confirmed first that the eframe + tray-icon stack
+cross-compiles to `x86_64-pc-windows-gnu` from macOS — eframe's **default glow/OpenGL backend
+links fine under mingw-w64** (cargo check AND a full link build), so no wgpu fallback was
+needed. Then split `crates/airpaste-tray` into a shared egui `App` (`app.rs`) + per-OS bits
+(`platform.rs`): CJK font path (`C:\Windows\Fonts\msyh.ttc`) and the tray-only window policy
+(macOS `Accessory`; Windows `ViewportBuilder::with_taskbar(false)` → winit skip-taskbar). Added
+`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` so release builds have no
+console window/taskbar button. Verified on the real Windows GNU host (release build via WinLibs):
+links, renders Chinese in 微软雅黑, no console, no taskbar button, tray icon present. See
+"Menu-bar UI". Remaining: reliably click-test the tray right-click menu (显示/退出) and
+close-to-hide on Windows (the menu code is shared with the verified macOS path; the miss was a
+UI-automation targeting issue), then fold Windows UI follow-ups into 3c.
 
 ### 3. Continue macOS Agent
 
