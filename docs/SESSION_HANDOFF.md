@@ -148,6 +148,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\smoke-server.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-isolated.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-isolated-hotkey.ps1   # interactive; needs a desktop session
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-tray-connect.ps1      # visual: tray UI connects + inbox populates (needs a desktop session)
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1        # copy release exe to %LOCALAPPDATA%\AirPaste (stable path for autostart)
 ```
 
 On macOS:
@@ -162,6 +163,7 @@ scripts/smoke-relay-macos.sh --auth-token airpaste-relay-secret
 scripts/smoke-isolated-macos.sh
 scripts/smoke-isolated-macos.sh --auth-token airpaste-iso-secret
 scripts/smoke-hotkey-macos.sh
+scripts/bundle-macos.sh                 # build dist/AirPaste.app (menu-bar accessory)
 ```
 
 Known harmless warning:
@@ -503,11 +505,37 @@ Not yet click-verified on Windows: the tray right-click menu (显示/退出) and
 menu/close code is shared with the verified macOS path; the miss was a UI-automation
 click-targeting issue, not a code one.
 
-Not done yet (UI follow-ups): the tray right-click menu (显示/退出) and close-to-hide still need
-a reliable Windows click-test; pairing/config UI and inbox history (the `AgentHandle` control
-surface is currently just `set_isolated`); surfacing the agent's connection error in the UI
-(it currently sits at 连接中… when registration fails); a real app icon (the tray icon is a drawn
-disc); packaging as a `.app` (macOS) / `.exe` + autostart (Windows).
+UI features added (2026-06-08, after the initial Windows port — commits `06bf51d`, `0dda82b`,
+`948ec6a`):
+
+- **Real app icon**: a white paper-plane on a rounded blue tile, drawn in code (`icon_rgba()`),
+  used for both the tray icon and the window/taskbar icon. Single swap point for a PNG logo later.
+- **Inbox history**: the inbox is a bounded `VecDeque` (latest 20, newest first); the UI shows a
+  scrollable list with per-entry copy (`AgentHandle::inbox_history()`).
+- **Connection-error display**: `AgentHandle::last_error()` drives a three-state status line —
+  ● 已连接 / ✕ 连接失败:<err> / ○ 连接中…. (`AgentShared.last_error` is set when the embedded
+  agent stops, e.g. registration fails.)
+- **In-window pairing/config**: a "设置 / 连接" panel (server URL / pair code / auth token +
+  「保存并连接」) backed by a persisted `TrayConfig` JSON under `airpaste_agent::app_support_dir()`.
+  Startup overlays config onto the parsed args only where still default, so CLI/env wins.
+  「保存并连接」 persists, clears the cached `device_id` if the server changed, and **re-execs the
+  process** so the OS reclaims the agent's bound peer port / hotkeys / mDNS (chosen over an
+  in-process restart, which would orphan `run()`'s detached peer/poll/ws tasks). The one-shot pair
+  code is cleared from the config once connected (a consumed code is a hard error on re-confirm).
+- **Start at login**: a「开机自启」checkbox + `crate::autostart` (macOS LaunchAgent plist;
+  Windows `HKCU\…\Run` via `reg.exe`; no extra deps).
+- **Packaging**: `scripts/bundle-macos.sh` → `dist/AirPaste.app` (Info.plist `LSUIElement=true`);
+  `scripts/install-windows.ps1` → copies the release exe to `%LOCALAPPDATA%\AirPaste`.
+
+Verified on macOS (isolated `HOME`): the tray reads `tray-config.json` with no CLI flags, pairs,
+connects, receives a clip into the inbox, and the pair code is cleared from the config afterwards;
+the icon artwork was eyeballed via an offline render; `dist/AirPaste.app` builds and launches
+without panic. Not yet exercised on real hardware: the interactive config-panel「保存并连接」→
+re-exec flow, the「开机自启」toggle (plist / Run-key creation), and (still) the Windows tray
+right-click menu (显示/退出). The connection-config UI compiles on both targets.
+
+Not done yet (UI follow-ups): real-hardware pass on the config-panel re-exec + 开机自启 toggle +
+Windows right-click menu; a designed PNG/`.icns` logo; richer pairing UX (fingerprint compare).
 
 ## Important MVP Limitations
 
@@ -593,10 +621,11 @@ make the source unreachable or pass `--prefer-relay`) before relying on it.
 ### 3c. Menu-bar UI (`airpaste-tray`)
 
 Done: scaffold + agent wiring, Chinese UI (CJK font), menu-bar-only (accessory, close-to-hide),
-and a runtime isolated-mode toggle (see "Menu-bar UI"). Next: pairing/config UI and inbox
-history (extend `AgentHandle`'s control surface beyond `set_isolated`); a real app icon; and
-package it as a `.app` / login item. A real-session pass to eyeball the Chinese rendering, the
-absent Dock icon, and the toggle is still worthwhile.
+runtime isolated-mode toggle, **real app icon, inbox history, connection-error display,
+in-window pairing/config (persisted `TrayConfig` + re-exec reconnect), start-at-login toggle, and
+lightweight packaging (`bundle-macos.sh` / `install-windows.ps1`)** — see "Menu-bar UI". Next: a
+real-hardware pass on the config-panel「保存并连接」→ re-exec and the「开机自启」toggle; a designed
+PNG/`.icns` logo; richer pairing UX (device fingerprint compare).
 
 ### 3d. Windows UI — DONE (2026-06-08), minor click-test follow-up
 
