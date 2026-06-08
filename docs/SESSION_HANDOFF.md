@@ -551,6 +551,25 @@ history (extend `AgentHandle`'s control surface beyond `set_isolated`); a real a
 package it as a `.app` / login item. A real-session pass to eyeball the Chinese rendering, the
 absent Dock icon, and the toggle is still worthwhile.
 
+### 3d. Windows UI (next planned task — built on macOS)
+
+Bring the same tray UI to Windows. `crates/airpaste-tray` is currently macOS-only: GUI deps
+are gated under `[target.'cfg(target_os = "macos")'.dependencies]` and `main.rs` has a
+non-macOS stub. The agent is already a cross-platform library (`spawn_embedded` + `AgentHandle`).
+
+**Verify the gating risk FIRST, before writing any UI**: does the eframe + tray-icon stack
+cross-compile to `x86_64-pc-windows-gnu` from macOS? eframe's default `glow`/glutin (OpenGL)
+backend is the usual trouble spot on windows-gnu, and the Windows host has no MSVC (GNU only).
+Temporarily ungate the deps and run `cargo check --target x86_64-pc-windows-gnu -p airpaste-tray`
+(or extend `scripts/cross-windows.sh`). If `glow` fails, consider eframe's `wgpu` backend.
+
+If it cross-compiles: split `airpaste-tray` into a shared egui `App` + platform bits — font
+path (Windows: `C:\Windows\Fonts\msyh.ttc` / Microsoft YaHei), and the "no taskbar / minimize
+to tray" equivalent of the macOS accessory policy (winit has `WindowAttributesExtWindows`
+skip-taskbar; the macOS `ActivationPolicy` call must stay macOS-gated). Then ungate for both
+platforms, build on macOS via cross-compile, and run/verify on the real Windows machine via
+the parallel Windows agent (RDP).
+
 ### 3. Continue macOS Agent
 
 See `docs/MACOS_AGENT_PLAN.md`.
