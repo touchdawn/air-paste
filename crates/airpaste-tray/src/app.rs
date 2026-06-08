@@ -345,6 +345,24 @@ impl eframe::App for TrayApp {
                     ui.weak("保存后会重启应用以使用新配置。");
                 });
 
+            if let Some(progress) = self.agent.transfer_progress() {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                let fraction = if progress.total > 0 {
+                    progress.done as f32 / progress.total as f32
+                } else {
+                    0.0
+                };
+                ui.label(format!(
+                    "下载中 {}/{}:{}",
+                    progress.done,
+                    progress.total,
+                    preview(&progress.current)
+                ));
+                ui.add(egui::ProgressBar::new(fraction).desired_width(360.0));
+            }
+
             if let Some(pending) = self.agent.pending_files() {
                 ui.add_space(8.0);
                 ui.separator();

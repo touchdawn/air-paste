@@ -95,6 +95,32 @@ fn next_arrival_seq() -> u64 {
     CLIP_ARRIVAL_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// Live progress of the current file download, for the UI. Process-global because an embedded
+/// agent applies one file clip at a time; concurrent transfers would simply share the latest.
+#[derive(Clone, Debug)]
+pub struct TransferProgress {
+    pub done: usize,
+    pub total: usize,
+    pub current: String,
+}
+
+static TRANSFER_PROGRESS: std::sync::Mutex<Option<TransferProgress>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn set_transfer_progress(progress: Option<TransferProgress>) {
+    if let Ok(mut guard) = TRANSFER_PROGRESS.lock() {
+        *guard = progress;
+    }
+}
+
+/// Clears the transfer progress whenever an `apply` returns (success, bail, or error).
+struct TransferProgressGuard;
+impl Drop for TransferProgressGuard {
+    fn drop(&mut self) {
+        set_transfer_progress(None);
+    }
+}
+
 /// Clipboard integration mode plus the isolated-mode inbox (recent remote texts held in-app
 /// instead of being written to the system clipboard, newest first) and arrival markers used to
 /// pick text-vs-files by recency.
@@ -230,6 +256,11 @@ impl AgentHandle {
             total_size: pending.file_clip.total_size,
             names,
         })
+    }
+
+    /// Live progress of the current file download, if one is running.
+    pub fn transfer_progress(&self) -> Option<TransferProgress> {
+        TRANSFER_PROGRESS.lock().ok().and_then(|guard| guard.clone())
     }
 }
 
@@ -1880,6 +1911,8 @@ async fn apply_file_clip(
     cache_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     validate_file_clip(&pending.file_clip, file_policy)?;
+    // Surface per-file download progress to the UI; cleared on any return.
+    let _progress = TransferProgressGuard;
 
     // Indexes are filled in by whichever path delivers them. On a direct->relay fallback the
     // map already holds the files fetched directly, so the relay only pulls the rest instead
@@ -2068,8 +2101,14 @@ async fn download_remote_files(
     let clip_cache_dir = cache_dir.join(file_clip.transfer_token.as_str());
     tokio::fs::create_dir_all(&clip_cache_dir).await?;
 
+    let total = total_files(file_clip);
     for index in missing_file_indexes(file_clip, downloaded) {
         let entry = &file_clip.files[index];
+        set_transfer_progress(Some(TransferProgress {
+            done: downloaded.len(),
+            total,
+            current: entry.relative_path.clone(),
+        }));
         let url = format!(
             "{}/v1/files/{}/{}",
             peer_base_url.trim_end_matches('/'),
@@ -2087,11 +2126,25 @@ async fn download_remote_files(
             .await?;
         let destination = safe_cache_path(&clip_cache_dir, &entry.relative_path, &entry.display_name);
         download_peer_file_to_cache(response, entry, &destination).await?;
-        tracing::info!(path = %destination.display(), "downloaded remote file");
-        downloaded.insert(index, destination);
+        downloaded.insert(index, destination.clone());
+        tracing::info!(path = %destination.display(), progress = format!("{}/{}", downloaded.len(), total), "downloaded remote file");
+        set_transfer_progress(Some(TransferProgress {
+            done: downloaded.len(),
+            total,
+            current: entry.relative_path.clone(),
+        }));
     }
 
     Ok(())
+}
+
+/// Number of regular-file entries in a manifest (directories/symlinks are not transferred).
+fn total_files(file_clip: &FileClip) -> usize {
+    file_clip
+        .files
+        .iter()
+        .filter(|entry| matches!(entry.kind, FileEntryKind::File))
+        .count()
 }
 
 async fn hash_file_sha256(path: &Path) -> anyhow::Result<String> {

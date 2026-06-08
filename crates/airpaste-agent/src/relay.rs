@@ -278,8 +278,14 @@ pub async fn download_via_relay(
     let clip_cache_dir = cache_dir.join(file_clip.transfer_token.as_str());
     tokio::fs::create_dir_all(&clip_cache_dir).await?;
 
+    let total = crate::total_files(file_clip);
     for index in missing {
         let entry = &file_clip.files[index];
+        crate::set_transfer_progress(Some(crate::TransferProgress {
+            done: downloaded.len(),
+            total,
+            current: entry.relative_path.clone(),
+        }));
 
         let signature = identity.sign_peer_file_request(
             clip_id,
@@ -336,8 +342,13 @@ pub async fn download_via_relay(
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&destination, &plaintext).await?;
-        tracing::info!(path = %destination.display(), "downloaded remote file via relay");
-        downloaded.insert(index, destination);
+        downloaded.insert(index, destination.clone());
+        crate::set_transfer_progress(Some(crate::TransferProgress {
+            done: downloaded.len(),
+            total,
+            current: entry.relative_path.clone(),
+        }));
+        tracing::info!(path = %destination.display(), progress = format!("{}/{}", downloaded.len(), total), "downloaded remote file via relay");
     }
 
     Ok(())
