@@ -75,9 +75,11 @@ macOS menu-bar UI:
     Added `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` so release builds
     are truly tray-only. **Verified on the real Windows GNU host** (release build): links cleanly
     on the WinLibs toolchain, the window renders Chinese (微软雅黑), no console window, no taskbar
-    button, and the tray icon is present. Remaining: the tray right-click menu (显示/退出) was not
-    reliably click-tested this round (test-harness click-targeting issue, not a code one — the
-    menu code is shared with the verified macOS path). See "Menu-bar UI".
+    button, and the tray icon is present. **End-to-end connection also verified** (new
+    `scripts/smoke-tray-connect.ps1`, tray as receiver): paired + ● 已连接, device id shown, a
+    published text clip decrypted into the isolated inbox and 复制到剪贴板 worked. Remaining: the
+    tray right-click menu (显示/退出) was not reliably click-tested (test-harness click-targeting
+    issue, not a code one — the menu code is shared with the verified macOS path). See "Menu-bar UI".
 
 Recent commits (newest first): `83fd0f2` Windows tray: hide console in release,
 `3703107` cross-platform tray (macOS + Windows); `fe3eaf2` tray UI docs, `e766fd3` runtime isolated toggle,
@@ -145,6 +147,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\smoke-agent.ps1 -Bind 127.0.0
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-server.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-isolated.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-isolated-hotkey.ps1   # interactive; needs a desktop session
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-tray-connect.ps1      # visual: tray UI connects + inbox populates (needs a desktop session)
 ```
 
 On macOS:
@@ -484,12 +487,20 @@ runs isolated mode with the global hotkeys; the font atlas + accessory mode laun
 panics; `cargo check --workspace`, the unit tests, and the three macOS smokes all pass.
 
 Verified on the real Windows GNU host (2026-06-08, release build via the WinLibs toolchain):
-`cargo build --release -p airpaste-tray` links cleanly, the embedded agent starts (then logs
-`failed to register device` with no server, as expected), the egui window renders Chinese in
+`cargo build --release -p airpaste-tray` links cleanly, the egui window renders Chinese in
 微软雅黑 (no `no CJK font found` warning, so `C:\Windows\Fonts\msyh.ttc` loaded), there is no
 console window and no taskbar button (true tray-only), and the tray icon is present in the
-notification-area overflow. Not yet click-verified on Windows: the tray right-click menu
-(显示/退出) — the menu code is shared with the verified macOS path; the miss was a UI-automation
+notification-area overflow.
+
+**End-to-end connection verified on Windows** via `scripts/smoke-tray-connect.ps1` (fresh
+server + a CLI bootstrap device that mints a pair code; the tray runs as the receiver): the
+tray paired (`pairing confirmed trusted=true`), the window flipped to ● 已连接 (green) with the
+device id shown, a text clip published from the bootstrap device decrypted into the tray's
+isolated inbox (`stored remote text in isolated inbox`, shown under 最近收到), and "复制到剪贴板"
+worked. Windows hotkeys (`Ctrl+Shift+V` / `Ctrl+Shift+C`) registered too.
+
+Not yet click-verified on Windows: the tray right-click menu (显示/退出) and close-to-hide — the
+menu/close code is shared with the verified macOS path; the miss was a UI-automation
 click-targeting issue, not a code one.
 
 Not done yet (UI follow-ups): the tray right-click menu (显示/退出) and close-to-hide still need
@@ -597,10 +608,12 @@ needed. Then split `crates/airpaste-tray` into a shared egui `App` (`app.rs`) + 
 (macOS `Accessory`; Windows `ViewportBuilder::with_taskbar(false)` → winit skip-taskbar). Added
 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` so release builds have no
 console window/taskbar button. Verified on the real Windows GNU host (release build via WinLibs):
-links, renders Chinese in 微软雅黑, no console, no taskbar button, tray icon present. See
-"Menu-bar UI". Remaining: reliably click-test the tray right-click menu (显示/退出) and
-close-to-hide on Windows (the menu code is shared with the verified macOS path; the miss was a
-UI-automation targeting issue), then fold Windows UI follow-ups into 3c.
+links, renders Chinese in 微软雅黑, no console, no taskbar button, tray icon present, and a full
+end-to-end connection (pair → ● 已连接 → isolated inbox populated → copy) via
+`scripts/smoke-tray-connect.ps1`. See "Menu-bar UI". Remaining: reliably click-test the tray
+right-click menu (显示/退出) and close-to-hide on Windows (the menu code is shared with the
+verified macOS path; the miss was a UI-automation targeting issue), then fold Windows UI
+follow-ups into 3c.
 
 ### 3. Continue macOS Agent
 
