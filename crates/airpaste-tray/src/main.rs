@@ -13,6 +13,7 @@ mod app;
 mod autostart;
 mod config;
 mod platform;
+mod server;
 
 fn main() -> eframe::Result<()> {
     app::run()

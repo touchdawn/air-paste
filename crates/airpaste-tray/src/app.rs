@@ -14,6 +14,7 @@ use tray_icon::{
 
 use crate::config::TrayConfig;
 use crate::platform;
+use crate::server::{ServerController, ServerStatus};
 
 pub fn run() -> eframe::Result<()> {
     // The tray is the isolated-mode UX, so default to isolated unless the user overrides it.
@@ -49,6 +50,8 @@ pub fn run() -> eframe::Result<()> {
         pair_code: args.pair_code.clone().unwrap_or_default(),
     };
 
+    let run_server = config.run_server;
+
     // eframe owns the main thread, so the Tokio runtime + agent live on a background thread.
     let (tx, rx) = mpsc::channel();
     thread::Builder::new()
@@ -62,15 +65,22 @@ pub fn run() -> eframe::Result<()> {
                 }
             };
             rt.block_on(async move {
+                let server = ServerController::new(tokio::runtime::Handle::current());
+                // Start the embedded server BEFORE the agent and wait for it to listen, so an
+                // agent pointed at localhost does not race the bind (it does not retry register).
+                if run_server {
+                    server.start();
+                    server.wait_until_ready().await;
+                }
                 let handle = airpaste_agent::spawn_embedded(args);
-                let _ = tx.send(handle);
+                let _ = tx.send((handle, server));
                 // Keep the runtime (and the agent task) alive for the life of the process.
                 std::future::pending::<()>().await;
             });
         })
         .expect("spawn agent runtime thread");
 
-    let agent = rx.recv().expect("agent handle from runtime thread");
+    let (agent, server) = rx.recv().expect("agent handle from runtime thread");
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -85,7 +95,7 @@ pub fn run() -> eframe::Result<()> {
     eframe::run_native(
         "AirPaste",
         options,
-        Box::new(move |cc| Ok(Box::new(TrayApp::new(cc, agent, settings)))),
+        Box::new(move |cc| Ok(Box::new(TrayApp::new(cc, agent, settings, server)))),
     )
 }
 
@@ -116,6 +126,8 @@ struct TrayApp {
     pair_code_cleared: bool,
     // Cached "start at login" state (read once; refreshed when the checkbox is toggled).
     autostart: bool,
+    // Embedded control-plane server (the "run a server on this machine" toggle).
+    server: ServerController,
 }
 
 /// Install a CJK-capable font as the primary UI font so Chinese text renders (egui's default
@@ -148,7 +160,12 @@ fn install_cjk_font(ctx: &egui::Context) {
 }
 
 impl TrayApp {
-    fn new(cc: &eframe::CreationContext<'_>, agent: AgentHandle, settings: Settings) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        agent: AgentHandle,
+        settings: Settings,
+        server: ServerController,
+    ) -> Self {
         install_cjk_font(&cc.egui_ctx);
 
         let show = MenuItem::new("显示 AirPaste", true, None);
@@ -177,6 +194,7 @@ impl TrayApp {
             pair_code_input: settings.pair_code,
             pair_code_cleared: false,
             autostart: crate::autostart::is_autostart_enabled(),
+            server,
         }
     }
 
@@ -307,6 +325,33 @@ impl eframe::App for TrayApp {
                     Ok(()) => self.autostart = crate::autostart::is_autostart_enabled(),
                     Err(error) => eprintln!("airpaste-tray: failed to set autostart: {error}"),
                 }
+            }
+
+            let mut run_server = self.server.is_running();
+            if ui
+                .checkbox(&mut run_server, "本机作为服务器(供其它设备连接)")
+                .changed()
+            {
+                if run_server {
+                    self.server.start();
+                } else {
+                    self.server.stop();
+                }
+                let mut config = TrayConfig::load();
+                config.run_server = run_server;
+                let _ = config.save();
+            }
+            match self.server.status() {
+                ServerStatus::Running => {
+                    ui.weak(format!("服务器运行中:{}(其它设备用本机 IP:{} 连接)", self.server.bind(), self.server.bind().port()));
+                }
+                ServerStatus::Failed(error) => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xd9, 0x3a, 0x3a),
+                        format!("服务器启动失败:{}", preview(&error)),
+                    );
+                }
+                ServerStatus::Off => {}
             }
 
             ui.add_space(6.0);

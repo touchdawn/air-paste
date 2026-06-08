@@ -10,6 +10,7 @@ repository.workspace = true
 # backend links fine under mingw-w64).
 [dependencies]
 airpaste-agent = { path = "../airpaste-agent" }
+airpaste-server = { path = "../airpaste-server" }
 eframe.workspace = true
 tray-icon.workspace = true
 tokio.workspace = true

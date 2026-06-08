@@ -1,15 +1,5 @@
-mod relay;
-mod routes;
-mod state;
-mod store;
-mod ws;
-
-use crate::{routes::router, state::AppState, store::Store};
-use anyhow::Context;
 use clap::Parser;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
-use tokio::net::TcpListener;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use std::{net::SocketAddr, path::PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Parser)]
@@ -37,26 +27,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let store = Store::open(&args.db)
-        .with_context(|| format!("failed to open database at {}", args.db.display()))?;
-    let auth_token = args.auth_token.filter(|token| !token.is_empty());
-    let auth_enabled = auth_token.is_some();
-    let state = Arc::new(AppState::new(store, auth_token));
-    let app = router(state)
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
-
-    let listener = TcpListener::bind(args.bind)
-        .await
-        .with_context(|| format!("failed to bind {}", args.bind))?;
-
-    tracing::info!(bind = %args.bind, auth_enabled, "airpaste-server listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server failed")?;
-
-    Ok(())
+    airpaste_server::serve(args.bind, &args.db, args.auth_token, shutdown_signal()).await
 }
 
 async fn shutdown_signal() {

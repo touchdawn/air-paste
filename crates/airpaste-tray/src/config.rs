@@ -21,6 +21,9 @@ pub struct TrayConfig {
     /// cached device id registered on the old server).
     #[serde(default)]
     pub last_server_url: Option<String>,
+    /// Run an embedded control-plane server on this machine (for other devices to connect to).
+    #[serde(default)]
+    pub run_server: bool,
 }
 
 /// `<app-support>/AirPaste/tray-config.json`.
