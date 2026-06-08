@@ -329,7 +329,12 @@ pub async fn download_via_relay(
             }
         }
 
-        let destination = crate::safe_cache_path(&clip_cache_dir, &entry.display_name);
+        let destination =
+            crate::safe_cache_path(&clip_cache_dir, &entry.relative_path, &entry.display_name);
+        // Recreate the entry's subdirectories (a copied folder's structure) before writing.
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
         tokio::fs::write(&destination, &plaintext).await?;
         tracing::info!(path = %destination.display(), "downloaded remote file via relay");
         downloaded.insert(index, destination);

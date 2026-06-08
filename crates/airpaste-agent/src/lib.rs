@@ -702,6 +702,57 @@ fn decrypt_remote_text(
     }
 }
 
+/// Flatten a dropped selection into the regular files to transfer, walking directories
+/// recursively. Each tuple is `(relative_path_within_the_clip, absolute_source_path)`, kept in
+/// the order the peer will serve them by index. The top-level base name is included so the
+/// receiver recreates a copied folder by name. Symlinks and special files are skipped (avoids
+/// cycles and selecting outside the chosen items).
+fn collect_publish_files(inputs: &[PathBuf]) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let mut out = Vec::new();
+    for input in inputs {
+        let base = input
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "item".to_string());
+        let metadata = std::fs::symlink_metadata(input)
+            .with_context(|| format!("failed to stat {}", input.display()))?;
+        if metadata.is_file() {
+            out.push((base, input.clone()));
+        } else if metadata.is_dir() {
+            walk_publish_dir(input, &base, &mut out)?;
+        }
+        // symlinks / sockets / fifos are skipped.
+    }
+    Ok(out)
+}
+
+fn walk_publish_dir(
+    dir: &Path,
+    rel_prefix: &str,
+    out: &mut Vec<(String, PathBuf)>,
+) -> anyhow::Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read directory {}", dir.display()))?
+        .filter_map(Result::ok)
+        .collect();
+    // Deterministic order so the manifest and served paths are stable.
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let child_rel = format!("{rel_prefix}/{name}");
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if metadata.is_file() {
+            out.push((child_rel, path));
+        } else if metadata.is_dir() {
+            walk_publish_dir(&path, &child_rel, out)?;
+        }
+    }
+    Ok(())
+}
+
 async fn publish_file_manifest(
     client: &ServerClient,
     device_id: &DeviceId,
@@ -710,30 +761,36 @@ async fn publish_file_manifest(
     file_policy: &FileTransferPolicy,
     paths: Vec<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
-    if paths.len() > file_policy.max_file_count {
+    // Flatten the selection into regular files, walking directories recursively so a copied
+    // folder transfers its contents (each file keeps a relative path under the folder name).
+    let collected = collect_publish_files(&paths)?;
+    if collected.is_empty() {
+        tracing::warn!(
+            "file selection had no transferable regular files (empty dirs / symlinks are skipped)"
+        );
+        return Ok(());
+    }
+    if collected.len() > file_policy.max_file_count {
         bail!(
-            "file clipboard contains {} items, above configured limit {}",
-            paths.len(),
+            "file selection expands to {} files, above configured limit {}",
+            collected.len(),
             file_policy.max_file_count
         );
     }
 
-    let mut files = Vec::with_capacity(paths.len());
+    let mut files = Vec::with_capacity(collected.len());
+    let mut served_paths = Vec::with_capacity(collected.len());
     let mut total_size = 0u64;
     let transfer_token = TransferToken::new();
 
-    for path in &paths {
-        let metadata = std::fs::metadata(&path).ok();
-        let is_file = metadata.as_ref().is_some_and(|metadata| metadata.is_file());
-        let size = metadata
-            .as_ref()
-            .filter(|_| is_file)
+    for (relative_path, source_path) in collected {
+        let size = std::fs::metadata(&source_path)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        if is_file && size > file_policy.max_single_file_bytes {
+        if size > file_policy.max_single_file_bytes {
             bail!(
                 "file {} is {} bytes, above configured single-file limit {}",
-                path.display(),
+                source_path.display(),
                 size,
                 file_policy.max_single_file_bytes
             );
@@ -741,40 +798,32 @@ async fn publish_file_manifest(
         total_size = total_size.saturating_add(size);
         if total_size > file_policy.max_total_file_bytes {
             bail!(
-                "file clipboard is {} bytes, above configured limit {}",
+                "file selection is {} bytes, above configured limit {}",
                 total_size,
                 file_policy.max_total_file_bytes
             );
         }
 
-        let display_name = path
+        let display_name = std::path::Path::new(&relative_path)
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("unnamed")
             .to_string();
-        let kind = if metadata.as_ref().is_some_and(|metadata| metadata.is_dir()) {
-            FileEntryKind::Directory
-        } else {
-            FileEntryKind::File
-        };
-        let sha256 = if is_file {
-            Some(
-                hash_file_sha256(path)
-                    .await
-                    .with_context(|| format!("failed to hash file {}", path.display()))?,
-            )
-        } else {
-            None
-        };
+        let sha256 = Some(
+            hash_file_sha256(&source_path)
+                .await
+                .with_context(|| format!("failed to hash file {}", source_path.display()))?,
+        );
 
         files.push(FileEntry {
-            relative_path: display_name.clone(),
+            relative_path,
             display_name,
             size,
             modified_at: None,
             sha256,
-            kind,
+            kind: FileEntryKind::File,
         });
+        served_paths.push(source_path);
     }
 
     let transfer_expires_at = airpaste_core::now()
@@ -785,7 +834,7 @@ async fn publish_file_manifest(
         None,
         device_id.clone(),
         trusted_device_public_keys(client).await?,
-        paths.clone(),
+        served_paths,
         file_policy.transfer_token_ttl,
     )?;
     let response = client
@@ -1007,6 +1056,68 @@ mod tests {
             filter_sensitive_text: true,
             max_text_clip_bytes: 128 * 1024,
         }
+    }
+
+    #[test]
+    fn safe_cache_path_recreates_subdirs_but_never_escapes() {
+        let base = Path::new("/cache/tok");
+
+        // Normal structured path: subdirectories are recreated under the base.
+        assert_eq!(
+            safe_cache_path(base, "docs/sub/file.txt", "file.txt"),
+            Path::new("/cache/tok/docs/sub/file.txt")
+        );
+
+        // Plain file (relative_path == display_name): one component under the base.
+        assert_eq!(
+            safe_cache_path(base, "note.txt", "note.txt"),
+            Path::new("/cache/tok/note.txt")
+        );
+
+        // Traversal must be neutralized: `..` components are dropped, so the result stays under
+        // the base no matter what a (buggy/compromised) peer sends.
+        for evil in [
+            "../../etc/passwd",
+            "..\\..\\Windows\\System32\\x",
+            "/etc/passwd",
+            "a/../../b",
+            "....//x", // not a real parent ref; sanitized component, still contained
+        ] {
+            let got = safe_cache_path(base, evil, "fallback.bin");
+            assert!(
+                got.starts_with(base),
+                "{evil:?} escaped the cache dir: {got:?}"
+            );
+            assert!(!got.to_string_lossy().contains(".."));
+        }
+
+        // All-unusable relative path falls back to the sanitized display name.
+        assert_eq!(
+            safe_cache_path(base, "../..", "fallback.bin"),
+            Path::new("/cache/tok/fallback.bin")
+        );
+    }
+
+    #[test]
+    fn collect_publish_files_walks_directories() {
+        let root = std::env::temp_dir().join(format!("airpaste-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("dir/sub")).unwrap();
+        std::fs::write(root.join("top.txt"), b"a").unwrap();
+        std::fs::write(root.join("dir/one.txt"), b"bb").unwrap();
+        std::fs::write(root.join("dir/sub/two.txt"), b"ccc").unwrap();
+
+        // Select a loose file plus a directory.
+        let inputs = vec![root.join("top.txt"), root.join("dir")];
+        let mut collected = collect_publish_files(&inputs).unwrap();
+        collected.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let rels: Vec<&str> = collected.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(rels, vec!["dir/one.txt", "dir/sub/two.txt", "top.txt"]);
+        // The folder name is preserved as the top-level prefix.
+        assert!(collected.iter().all(|(rel, path)| path.is_file() && !rel.contains("..")));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1915,7 +2026,7 @@ async fn download_remote_files(
                 identity,
             )
             .await?;
-        let destination = safe_cache_path(&clip_cache_dir, &entry.display_name);
+        let destination = safe_cache_path(&clip_cache_dir, &entry.relative_path, &entry.display_name);
         download_peer_file_to_cache(response, entry, &destination).await?;
         tracing::info!(path = %destination.display(), "downloaded remote file");
         downloaded.insert(index, destination);
@@ -1945,6 +2056,10 @@ async fn download_peer_file_to_cache(
     entry: &FileEntry,
     destination: &Path,
 ) -> anyhow::Result<()> {
+    // Recreate the entry's subdirectories (a copied folder's structure) before writing.
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
     let temporary = destination.with_extension("airpaste-download");
     let mut file = tokio::fs::File::create(&temporary).await?;
     let mut hasher = Sha256::new();
@@ -1996,21 +2111,49 @@ async fn download_peer_file_to_cache(
     result
 }
 
-fn safe_cache_path(cache_dir: &Path, display_name: &str) -> PathBuf {
-    let sanitized = display_name
+/// Build a destination under `cache_dir` for a downloaded entry, recreating the subdirectories
+/// encoded in `relative_path` (so a copied folder keeps its structure) while **never escaping
+/// `cache_dir`**: each path component is sanitized and `.`/`..`/empty/root components are
+/// dropped, so traversal is impossible by construction. Falls back to a flattened `display_name`
+/// if `relative_path` yields no usable component.
+pub(crate) fn safe_cache_path(cache_dir: &Path, relative_path: &str, display_name: &str) -> PathBuf {
+    let mut path = cache_dir.to_path_buf();
+    let mut pushed = false;
+    for component in relative_path.split(['/', '\\']) {
+        if let Some(name) = sanitize_component(component) {
+            path.push(name);
+            pushed = true;
+        }
+    }
+    if !pushed {
+        path.push(sanitize_component(display_name).unwrap_or_else(|| "download.bin".to_string()));
+    }
+    path
+}
+
+/// Sanitize one path component, or `None` if it must be dropped (empty, `.`, `..`, or
+/// all-illegal). Never returns a separator or traversal sequence, so callers can safely
+/// `push` the result under a base directory.
+fn sanitize_component(component: &str) -> Option<String> {
+    let trimmed = component.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return None;
+    }
+    let sanitized: String = trimmed
         .chars()
         .map(|ch| match ch {
-            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '/' | '\\' => '_',
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '/' | '\\' | '\0' => '_',
             ch if ch.is_control() => '_',
             ch => ch,
         })
-        .collect::<String>();
-    let file_name = if sanitized.trim().is_empty() {
-        "download.bin"
+        .collect();
+    // Trailing spaces/dots are invalid on Windows.
+    let cleaned = sanitized.trim_end_matches([' ', '.']);
+    if cleaned.is_empty() {
+        None
     } else {
-        sanitized.trim()
-    };
-    cache_dir.join(file_name)
+        Some(cleaned.to_string())
+    }
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
