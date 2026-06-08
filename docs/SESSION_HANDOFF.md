@@ -526,6 +526,14 @@ UI features added (2026-06-08, after the initial Windows port — commits `06bf5
   Windows `HKCU\…\Run` via `reg.exe`; no extra deps).
 - **Packaging**: `scripts/bundle-macos.sh` → `dist/AirPaste.app` (Info.plist `LSUIElement=true`);
   `scripts/install-windows.ps1` → copies the release exe to `%LOCALAPPDATA%\AirPaste`.
+- **Pure-GUI flow (no CLI)**: a「生成配对码」button mints a pair code for a new device
+  (`AgentHandle::generate_pair_code()` → `start_pairing` on the runtime); a「本机作为服务器」
+  checkbox runs an embedded control-plane server (airpaste-server is now a lib with
+  `serve(bind, db, auth, shutdown)`; `crate::server::ServerController` runs/stops it on the agent
+  runtime, started before the agent with `wait_until_ready()` so localhost connects don't race
+  the bind). `TrayConfig.run_server` persists it. So "host server → A connect → A mint code →
+  B paste code → send/receive" is all in the window. Verified end-to-end on macOS (embedded
+  server serves `/health`, the local agent connects to it, port frees on exit).
 
 Verified on macOS (isolated `HOME`): the tray reads `tray-config.json` with no CLI flags, pairs,
 connects, receives a clip into the inbox, and the pair code is cleared from the config afterwards;
