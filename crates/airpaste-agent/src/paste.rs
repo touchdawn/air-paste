@@ -26,8 +26,4 @@ impl PasteSimulator {
     pub fn paste(&self) -> anyhow::Result<()> {
         anyhow::bail!("paste simulation MVP is currently implemented only on Windows and macOS")
     }
-
-    pub fn copy(&self) -> anyhow::Result<()> {
-        anyhow::bail!("copy simulation MVP is currently implemented only on Windows and macOS")
-    }
 }

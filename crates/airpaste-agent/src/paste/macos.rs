@@ -1,4 +1,4 @@
-//! macOS synthetic copy/paste via CoreGraphics events.
+//! macOS synthetic paste via CoreGraphics events.
 //!
 //! Posting key events to other applications requires the process to be trusted for
 //! Accessibility (System Settings -> Privacy & Security -> Accessibility). `accessibility_trusted`
@@ -17,8 +17,7 @@ type CGEventFlags = u64;
 const KCG_HID_EVENT_TAP: CGEventTapLocation = 0;
 /// kCGEventFlagMaskCommand — the Command modifier.
 const KCG_EVENT_FLAG_MASK_COMMAND: CGEventFlags = 0x0010_0000;
-/// ANSI virtual key codes.
-const KEY_C: CGKeyCode = 8;
+/// ANSI virtual key code for V.
 const KEY_V: CGKeyCode = 9;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -52,11 +51,6 @@ impl PasteSimulator {
     /// Synthesize Command+V (paste into the focused app).
     pub fn paste(&self) -> anyhow::Result<()> {
         post_command_chord(KEY_V)
-    }
-
-    /// Synthesize Command+C (copy the current selection in the focused app).
-    pub fn copy(&self) -> anyhow::Result<()> {
-        post_command_chord(KEY_C)
     }
 }
 

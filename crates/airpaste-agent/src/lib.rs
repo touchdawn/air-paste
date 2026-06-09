@@ -58,17 +58,6 @@ const WS_RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// our text, paste, then let the target app consume it before restoring the user's clipboard.
 const CLIPBOARD_SETTLE: Duration = Duration::from_millis(80);
 const PASTE_CONSUME: Duration = Duration::from_millis(150);
-/// Wait for the triggering hotkey's Alt/Option to be released before synthesizing a chord, so
-/// the held modifiers do not combine with it (e.g. turning the synthetic Cmd+C into Ctrl+Cmd+C,
-/// which is not "copy"). The paste path already waits via CLIPBOARD_SETTLE after set_text.
-const HOTKEY_MODIFIER_RELEASE: Duration = Duration::from_millis(120);
-/// Polling for the result of a synthetic copy (the OS populates the clipboard async).
-const COPY_POLL_INTERVAL: Duration = Duration::from_millis(40);
-const COPY_POLL_ATTEMPTS: usize = 15;
-/// Written to the clipboard right before a synthetic copy so we can distinguish a real capture
-/// from "the copy did nothing"; uses zero-width separators so it never collides with a real
-/// selection.
-const COPY_SENTINEL: &str = "\u{2063}airpaste-copy-sentinel\u{2063}";
 
 /// Display name of the isolated-mode hotkey modifier (Alt on Windows, the same physical key is
 /// Option on macOS), used in user-facing strings. The chords are `<mod>+C` / `<mod>+V`.
@@ -491,12 +480,12 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     };
     if clip_ctx.is_isolated() {
         tracing::info!(
-            "clipboard isolated mode: {HOTKEY_MOD_NAME}+C pushes the selection, {HOTKEY_MOD_NAME}+V pastes from AirPaste"
+            "clipboard isolated mode: {HOTKEY_MOD_NAME}+C publishes the current clipboard, {HOTKEY_MOD_NAME}+V pastes from AirPaste"
         );
         if !paste.accessibility_trusted() {
             tracing::warn!(
-                "isolated mode needs Accessibility permission to synthesize copy/paste; \
-                 grant it in System Settings -> Privacy & Security -> Accessibility, then restart"
+                "isolated mode's {HOTKEY_MOD_NAME}+V needs Accessibility permission to paste into \
+                 other apps; grant it in System Settings -> Privacy & Security -> Accessibility, then restart"
             );
         }
     }
@@ -1457,13 +1446,16 @@ async fn run_ws(
                 let hotkey_clip_ctx = clip_ctx.clone();
                 let paste_after_hotkey = REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY;
                 tokio::spawn(async move {
+                    // De-dup state for Alt+C: skip re-publishing an unchanged clipboard (a stale
+                    // clipboard the user didn't refresh, or an accidental double-press).
+                    let last_pushed = Mutex::new(None::<String>);
                     while let Some(action) = hotkey_rx.recv().await {
                         let result = match action {
                             HotkeyAction::CopyToAirPaste => copy_selection_to_airpaste(
                                 &hotkey_client,
                                 &hotkey_device_id,
                                 &hotkey_clipboard,
-                                &hotkey_paste,
+                                &last_pushed,
                                 text_clip_ttl_secs,
                             )
                             .await
@@ -1815,37 +1807,21 @@ async fn paste_inbox_text(
     Ok(true)
 }
 
-/// Alt+C: synthesize a copy of the current selection, read it off the clipboard,
-/// restore the user's clipboard, and publish it to the AirPaste channel.
+/// Alt+C: publish the current system clipboard to the AirPaste channel. The user copies normally
+/// (Ctrl/Cmd+C) first, then presses Alt+C, so we read whatever they just placed on the clipboard
+/// instead of synthesizing a copy ourselves. This has no focus dependency, needs no Accessibility
+/// permission, and never touches the user's clipboard. De-duplicates against the last push so a
+/// stale clipboard or an accidental double-press does not republish.
 async fn copy_selection_to_airpaste(
     client: &ServerClient,
     device_id: &DeviceId,
     clipboard: &Clipboard,
-    paste: &PasteSimulator,
+    last_pushed: &Mutex<Option<String>>,
     text_clip_ttl_secs: u64,
 ) -> anyhow::Result<()> {
-    let saved = clipboard.get_text().ok().flatten();
-    // Let the triggering Alt/Option release so the synthetic copy is a clean Ctrl/Cmd+C.
-    tokio::time::sleep(HOTKEY_MODIFIER_RELEASE).await;
-    // Overwrite the clipboard with a sentinel BEFORE the synthetic copy, so we can tell a real
-    // capture (clipboard became some other non-empty text) from "the copy did nothing" (still
-    // the sentinel). Without this, a failed/slow synthetic copy would republish whatever was on
-    // the clipboard (e.g. a pairing code the user had just copied).
-    let _ = clipboard.set_text(COPY_SENTINEL);
-    paste.copy()?;
-    let selection = read_after_copy(clipboard).await;
-    // Restore the user's original clipboard (or clear our sentinel if there was nothing).
-    match &saved {
-        Some(previous) => {
-            let _ = clipboard.set_text(previous);
-        }
-        None => {
-            let _ = clipboard.set_text("");
-        }
-    }
-    let Some(text) = selection else {
+    let Some(text) = clipboard.get_text().ok().flatten() else {
         tracing::warn!(
-            "{HOTKEY_MOD_NAME}+C captured no text selection (select text in a normal app first; \
+            "{HOTKEY_MOD_NAME}+C found no clipboard text (copy something with Ctrl/Cmd+C first; \
              over RDP the clipboard can lag several seconds)"
         );
         return Ok(());
@@ -1853,24 +1829,16 @@ async fn copy_selection_to_airpaste(
     if text.trim().is_empty() {
         return Ok(());
     }
-    let response = publish_text_clip(client, device_id, text, text_clip_ttl_secs).await?;
-    tracing::info!(clip_id = %response.clip_id, "pushed selection to AirPaste");
-    Ok(())
-}
-
-/// Poll the clipboard for the result of a synthetic copy. Returns the captured text once the
-/// clipboard holds some non-empty value other than our pre-copy sentinel; returns `None` if it
-/// stays the sentinel (the copy captured nothing) so the caller does not republish stale text.
-async fn read_after_copy(clipboard: &Clipboard) -> Option<String> {
-    for _ in 0..COPY_POLL_ATTEMPTS {
-        tokio::time::sleep(COPY_POLL_INTERVAL).await;
-        if let Ok(Some(text)) = clipboard.get_text() {
-            if !text.is_empty() && text != COPY_SENTINEL {
-                return Some(text);
-            }
-        }
+    // Skip when the clipboard is unchanged since our last push: avoids re-sending a stale
+    // clipboard the user didn't refresh, and collapses an accidental double Alt+C into one clip.
+    if last_pushed.lock().await.as_deref() == Some(text.as_str()) {
+        tracing::info!("{HOTKEY_MOD_NAME}+C: clipboard unchanged since last push, skipping");
+        return Ok(());
     }
-    None
+    let response = publish_text_clip(client, device_id, text.clone(), text_clip_ttl_secs).await?;
+    *last_pushed.lock().await = Some(text);
+    tracing::info!(clip_id = %response.clip_id, "pushed clipboard to AirPaste");
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

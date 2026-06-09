@@ -17,10 +17,6 @@ impl PasteSimulator {
         self.send_ctrl_chord(VK_V)
     }
 
-    pub fn copy(&self) -> anyhow::Result<()> {
-        self.send_ctrl_chord(VK_C)
-    }
-
     /// Release the modifiers the user is holding from the triggering hotkey, then send a
     /// clean Ctrl+<key> chord so the synthesized keystroke is not mixed with the held Alt.
     fn send_ctrl_chord(&self, vk: u16) -> anyhow::Result<()> {
@@ -49,7 +45,6 @@ impl PasteSimulator {
 }
 
 const VK_V: u16 = 0x56;
-const VK_C: u16 = 0x43;
 
 fn key_input(vk: u16, flags: u32) -> INPUT {
     INPUT {
