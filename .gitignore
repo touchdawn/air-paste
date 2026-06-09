@@ -3,6 +3,7 @@
 *.redb
 *.redb-*
 .airpaste-agent*.json
+/lan-test-*
 rustup-init.exe
 vs_BuildTools.exe
 /tools/

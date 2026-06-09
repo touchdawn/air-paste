@@ -240,7 +240,10 @@ name = "airpaste-tray"
 version = "0.1.0"
 dependencies = [
  "airpaste-agent",
+ "airpaste-server",
  "eframe",
+ "serde",
+ "serde_json",
  "tokio",
  "tray-icon",
  "winit",
