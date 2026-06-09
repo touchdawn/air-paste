@@ -148,6 +148,26 @@ pub struct PendingFiles {
     pub names: Vec<String>,
 }
 
+/// A device from the server's registry, for the "connected devices" view (mainly useful when this
+/// host runs the embedded server). Built from a periodic `GET /v1/devices` snapshot.
+#[derive(Clone, Debug)]
+pub struct DeviceInfo {
+    pub device_id: String,
+    pub name: String,
+    pub trusted: bool,
+    /// Recent enough last-seen to count as currently connected.
+    pub online: bool,
+    /// Whether this row is the local host device.
+    pub is_self: bool,
+    /// Seconds since the server last saw the device; `None` if it never connected. May be slightly
+    /// negative under clock skew — callers clamp to 0 for display.
+    pub last_seen_secs: Option<i64>,
+}
+
+/// A device whose last-seen is within this window counts as online. The server refreshes last-seen
+/// on WebSocket connect and every 30s heartbeat, so 90s tolerates a missed beat.
+const PRESENCE_WINDOW_SECS: i64 = 90;
+
 /// Shared, observable agent state for embedders (the tray UI). Updated by the running agent.
 pub struct AgentShared {
     inbox: Arc<Mutex<VecDeque<String>>>,
@@ -170,6 +190,9 @@ pub struct AgentShared {
     client: std::sync::Mutex<Option<(ServerClient, DeviceId)>>,
     // Latest UI-requested pair code: Ok(code) / Ok("生成中…") / Err(reason).
     pair_code: std::sync::Mutex<Option<Result<String, String>>>,
+    // Snapshot of the server's device registry for the UI, refreshed by a background poll while
+    // connected. Empty until this device is trusted enough to list devices.
+    devices: std::sync::Mutex<Vec<DeviceInfo>>,
 }
 
 impl AgentShared {
@@ -190,6 +213,7 @@ impl AgentShared {
             runtime: tokio::runtime::Handle::current(),
             client: std::sync::Mutex::new(None),
             pair_code: std::sync::Mutex::new(None),
+            devices: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -269,6 +293,12 @@ impl AgentHandle {
     /// Live progress of the current file download, if one is running.
     pub fn transfer_progress(&self) -> Option<TransferProgress> {
         TRANSFER_PROGRESS.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    /// Snapshot of devices known to the server (for the "connected devices" view), refreshed in
+    /// the background while connected.
+    pub fn devices(&self) -> Vec<DeviceInfo> {
+        self.shared.devices.lock().unwrap().clone()
     }
 
     /// Mint a pairing code for another device (only this device must be trusted). Non-blocking:
@@ -531,6 +561,15 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         tokio::spawn(std::future::pending())
     };
 
+    // Keep a fresh snapshot of the server's device registry for the UI. Detached: failures (e.g.
+    // before this device is trusted) must not take down the agent. Clone client/device_id since
+    // `run_ws` below takes ownership of both.
+    tokio::spawn(refresh_devices_loop(
+        client.clone(),
+        device_id.clone(),
+        shared.clone(),
+    ));
+
     let ws_task = tokio::spawn(run_ws(
         client,
         clipboard,
@@ -565,6 +604,43 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Periodically refresh the UI's device-registry snapshot while connected. Detached; errors (this
+/// device not trusted yet, server briefly down) are logged at debug and retried on the next tick.
+async fn refresh_devices_loop(
+    client: ServerClient,
+    self_device_id: DeviceId,
+    shared: Arc<AgentShared>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        if !shared.connected.load(Ordering::Relaxed) {
+            continue;
+        }
+        match client.list_devices().await {
+            Ok(devices) => {
+                let now = chrono::Utc::now();
+                let infos = devices
+                    .into_iter()
+                    .map(|device| {
+                        let last_seen_secs = device.last_seen_at.map(|ts| (now - ts).num_seconds());
+                        DeviceInfo {
+                            online: last_seen_secs.map_or(false, |secs| secs < PRESENCE_WINDOW_SECS),
+                            is_self: device.device_id == self_device_id,
+                            device_id: device.device_id.0,
+                            name: device.name,
+                            trusted: device.trusted,
+                            last_seen_secs,
+                        }
+                    })
+                    .collect();
+                *shared.devices.lock().unwrap() = infos;
+            }
+            Err(error) => tracing::debug!(%error, "device list refresh failed"),
+        }
+    }
 }
 
 fn ensure_identity(

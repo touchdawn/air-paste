@@ -370,6 +370,40 @@ impl eframe::App for TrayApp {
             }
 
             ui.add_space(6.0);
+            let devices = self.agent.devices();
+            let online_count = devices.iter().filter(|d| d.online).count();
+            egui::CollapsingHeader::new(format!("设备({}/{} 在线)", online_count, devices.len()))
+                .default_open(self.server.is_running())
+                .show(ui, |ui| {
+                    if devices.is_empty() {
+                        ui.weak("(暂无 — 需先连接并完成配对)");
+                    } else {
+                        for device in &devices {
+                            ui.horizontal(|ui| {
+                                if device.online {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(0x2e, 0xb8, 0x72),
+                                        "●",
+                                    );
+                                } else {
+                                    ui.colored_label(egui::Color32::GRAY, "○");
+                                }
+                                let name = if device.is_self {
+                                    format!("{}(本机)", device.name)
+                                } else {
+                                    device.name.clone()
+                                };
+                                ui.label(name).on_hover_text(&device.device_id);
+                                if !device.trusted {
+                                    ui.weak("· 未信任");
+                                }
+                                ui.weak(format!("· {}", last_seen_text(device)));
+                            });
+                        }
+                    }
+                });
+
+            ui.add_space(6.0);
             egui::CollapsingHeader::new("设置 / 连接")
                 .default_open(!self.agent.connected())
                 .show(ui, |ui| {
@@ -521,6 +555,28 @@ fn version_line() -> String {
         env!("AIRPASTE_GIT_HASH"),
         env!("AIRPASTE_GIT_DATE"),
     )
+}
+
+/// Human-readable "last seen" for a device row: "在线", "从未连接", or "N 秒/分钟/小时/天前".
+fn last_seen_text(device: &airpaste_agent::DeviceInfo) -> String {
+    if device.online {
+        return "在线".to_string();
+    }
+    match device.last_seen_secs {
+        None => "从未连接".to_string(),
+        Some(secs) => {
+            let secs = secs.max(0);
+            if secs < 60 {
+                format!("{secs} 秒前")
+            } else if secs < 3600 {
+                format!("{} 分钟前", secs / 60)
+            } else if secs < 86_400 {
+                format!("{} 小时前", secs / 3600)
+            } else {
+                format!("{} 天前", secs / 86_400)
+            }
+        }
+    }
 }
 
 /// Format a byte count as a short human-readable size (B/KB/MB/GB).
