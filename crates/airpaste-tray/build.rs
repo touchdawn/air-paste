@@ -6,7 +6,9 @@ use std::process::Command;
 
 fn main() {
     let hash = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let dirty = git(&["status", "--porcelain"])
+    // Only tracked modifications count as "dirty" — untracked scratch files (test artifacts,
+    // unrelated docs) must not flip the marker, or every working tree would look modified.
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     let hash = if dirty { format!("{hash}+") } else { hash };
@@ -16,7 +18,10 @@ fn main() {
     println!("cargo:rustc-env=AIRPASTE_GIT_HASH={hash}");
     println!("cargo:rustc-env=AIRPASTE_GIT_DATE={date}");
 
-    // Re-run when HEAD moves so the embedded commit stays fresh between builds.
+    // Re-run when HEAD moves so the embedded commit stays fresh between builds. Also track this
+    // script itself: emitting any rerun-if-changed otherwise disables the default "rerun on
+    // package change", so edits here would not take effect until HEAD next moved.
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
 }
