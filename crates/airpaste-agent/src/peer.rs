@@ -281,10 +281,33 @@ pub async fn run_peer_server(bind: SocketAddr, registry: PeerFileRegistry) -> an
     let app = Router::new()
         .route("/v1/files/:token/:index", get(download_file))
         .with_state(registry);
-    let listener = TcpListener::bind(bind).await?;
+    let listener = bind_with_retry(bind).await?;
     tracing::info!(%bind, "peer file server listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Bind `addr`, retrying briefly while it is still in use. On a fast relaunch (the tray re-execs
+/// itself after a settings change) the previous process may not have released the peer port yet;
+/// a few short retries turn a fatal "address in use" (Windows `os error 10048`) into a brief wait.
+/// Any other bind error fails fast.
+async fn bind_with_retry(addr: SocketAddr) -> anyhow::Result<TcpListener> {
+    const ATTEMPTS: usize = 20;
+    const INTERVAL: Duration = Duration::from_millis(250);
+    for attempt in 1..=ATTEMPTS {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempt < ATTEMPTS => {
+                tracing::warn!(%addr, attempt, "peer port in use, retrying");
+                tokio::time::sleep(INTERVAL).await;
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("failed to bind peer port {addr} after {attempt} attempt(s)")));
+            }
+        }
+    }
+    unreachable!("the final attempt returns instead of looping")
 }
 
 async fn download_file(

@@ -24,6 +24,12 @@ pub fn run() -> eframe::Result<()> {
         std::env::set_var("AIRPASTE_CLIPBOARD_MODE", "isolated");
     }
     airpaste_agent::init_tracing();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        commit = env!("AIRPASTE_GIT_HASH"),
+        date = env!("AIRPASTE_GIT_DATE"),
+        "airpaste-tray starting"
+    );
     let mut args = airpaste_agent::parse_args();
 
     // Overlay persisted tray config where the parsed args are still at their defaults, so
@@ -257,7 +263,9 @@ impl eframe::App for TrayApp {
                 self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else if event.id == self.show_id {
+                // Make it reliably reappear in front: unhide, restore if minimized, then focus.
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
@@ -280,6 +288,13 @@ impl eframe::App for TrayApp {
             }
             self.pair_code_input.clear();
         }
+
+        // Pinned footer with the build identity, so "which build am I running?" is always visible.
+        egui::TopBottomPanel::bottom("version_bar").show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.weak(version_line());
+            ui.add_space(2.0);
+        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("AirPaste");
@@ -495,6 +510,17 @@ impl eframe::App for TrayApp {
             }
         });
     }
+}
+
+/// Build identity for the footer / startup log: `v<crate-version> · <git-hash> · <git-date>`.
+/// The hash and date come from `build.rs`; a trailing `+` on the hash means the tree was dirty.
+fn version_line() -> String {
+    format!(
+        "v{} · {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("AIRPASTE_GIT_HASH"),
+        env!("AIRPASTE_GIT_DATE"),
+    )
 }
 
 /// Format a byte count as a short human-readable size (B/KB/MB/GB).

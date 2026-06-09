@@ -27,12 +27,14 @@ const CANDIDATES: &[&str] = &[
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const CANDIDATES: &[&str] = &[];
 
-/// Make the app behave as a tray-only application on this platform.
+/// Apply this platform's window policy.
 ///
 /// - macOS: run as an `Accessory` activation-policy app — no Dock icon, no app menu bar — via
-///   eframe's event-loop-builder hook (winit's macOS extension).
-/// - Windows: keep the window out of the taskbar (`with_taskbar(false)` maps to winit's
-///   `skip_taskbar`); the tray icon is the only persistent presence.
+///   eframe's event-loop-builder hook (winit's macOS extension). The menu-bar icon is the
+///   persistent presence; that's the native menu-bar-app convention.
+/// - Windows: keep the *normal taskbar button*. The previous tray-only variant hid the window
+///   from the taskbar (`with_taskbar(false)`), which made it easy to lose behind other windows
+///   with no taskbar / Alt-Tab entry to bring it back. The tray icon still exists as an extra.
 pub fn apply_tray_window_policy(options: &mut eframe::NativeOptions) {
     #[cfg(target_os = "macos")]
     {
@@ -41,10 +43,7 @@ pub fn apply_tray_window_policy(options: &mut eframe::NativeOptions) {
             builder.with_activation_policy(ActivationPolicy::Accessory);
         }));
     }
-    #[cfg(target_os = "windows")]
-    {
-        options.viewport = std::mem::take(&mut options.viewport).with_taskbar(false);
-    }
-    // Other platforms (e.g. Linux): no special policy; the window behaves normally.
+    // Windows and other platforms: no special policy — the window keeps its normal taskbar button
+    // so it is always findable via the taskbar and Alt-Tab.
     let _ = options;
 }

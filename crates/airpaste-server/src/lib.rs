@@ -29,9 +29,7 @@ pub async fn serve(
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
-    let listener = TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("failed to bind {bind}"))?;
+    let listener = bind_with_retry(bind).await?;
 
     tracing::info!(bind = %bind, auth_enabled, "airpaste-server listening");
     axum::serve(listener, app)
@@ -39,4 +37,26 @@ pub async fn serve(
         .await
         .context("server failed")?;
     Ok(())
+}
+
+/// Bind `addr`, retrying briefly while it is still in use. When the embedded server is restarted
+/// by a tray re-exec, the previous process may not have released the port yet; a few short retries
+/// turn a fatal "address in use" into a brief wait. Any other bind error fails fast.
+async fn bind_with_retry(addr: SocketAddr) -> anyhow::Result<TcpListener> {
+    const ATTEMPTS: usize = 20;
+    const INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+    for attempt in 1..=ATTEMPTS {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempt < ATTEMPTS => {
+                tracing::warn!(%addr, attempt, "server port in use, retrying");
+                tokio::time::sleep(INTERVAL).await;
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("failed to bind {addr} after {attempt} attempt(s)")));
+            }
+        }
+    }
+    unreachable!("the final attempt returns instead of looping")
 }
