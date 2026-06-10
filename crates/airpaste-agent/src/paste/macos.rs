@@ -130,36 +130,23 @@ impl PasteSimulator {
             );
         }
         wait_for_modifier_release();
-        post_command_chord(KEY_V)?;
-        tracing::debug!("posted synthetic Cmd+V");
-        Ok(())
+        post_command_chord(KEY_V)
     }
 }
 
 /// Block (bounded) until the user releases the physical modifier keys held from the
 /// triggering hotkey. Best-effort: on timeout the paste proceeds anyway.
 fn wait_for_modifier_release() {
-    let start = Instant::now();
-    let initial = unsafe { CGEventSourceFlagsState(KCG_EVENT_SOURCE_STATE_COMBINED_SESSION) }
-        & MODIFIER_FLAGS;
-    let deadline = start + MODIFIER_RELEASE_TIMEOUT;
-    let mut timed_out = false;
+    let deadline = Instant::now() + MODIFIER_RELEASE_TIMEOUT;
     while unsafe { CGEventSourceFlagsState(KCG_EVENT_SOURCE_STATE_COMBINED_SESSION) }
         & MODIFIER_FLAGS
         != 0
     {
         if Instant::now() >= deadline {
-            timed_out = true;
             break;
         }
         std::thread::sleep(MODIFIER_RELEASE_POLL);
     }
-    tracing::debug!(
-        initial_flags = format_args!("{initial:#x}"),
-        waited_ms = start.elapsed().as_millis() as u64,
-        timed_out,
-        "modifier release wait finished"
-    );
 }
 
 /// Post a Command+<key> chord. The Command flag is set explicitly on each event so the

@@ -221,6 +221,30 @@ pub enum SendStatus {
     Failed(String),
 }
 
+/// Transient feedback for a hotkey action, surfaced by the tray as a short-lived floating
+/// HUD so the user sees that Alt+C / Alt+V actually fired (the hotkeys are otherwise silent).
+#[derive(Clone, Debug)]
+pub struct Toast {
+    pub text: String,
+    pub is_error: bool,
+}
+
+impl Toast {
+    fn info(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            is_error: false,
+        }
+    }
+
+    fn error(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            is_error: true,
+        }
+    }
+}
+
 /// Everything a UI-initiated file publish needs from the running agent: the peer-file grant
 /// registry (shared with the peer server), the advertised peer URL, and the transfer limits.
 #[derive(Clone)]
@@ -283,6 +307,9 @@ pub struct AgentShared {
     file_apply: std::sync::Mutex<Option<FileApplyCtx>>,
     // Text-clip TTL from the launch args, so UI sends expire like hotkey/poll publishes do.
     text_clip_ttl_secs: u64,
+    // Pending hotkey-feedback toasts, drained by the tray UI (bounded; harmlessly
+    // accumulates-then-drops when no UI is attached, e.g. the bare CLI agent).
+    toasts: std::sync::Mutex<Vec<Toast>>,
 }
 
 impl AgentShared {
@@ -310,6 +337,19 @@ impl AgentShared {
             file_publish: std::sync::Mutex::new(None),
             file_apply: std::sync::Mutex::new(None),
             text_clip_ttl_secs: args.text_clip_ttl_secs,
+            toasts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Queue a hotkey-feedback toast for the UI, keeping only the most recent few so the
+    /// queue stays bounded when nothing drains it.
+    fn push_toast(&self, toast: Toast) {
+        const TOASTS_MAX: usize = 8;
+        let mut toasts = self.toasts.lock().unwrap();
+        toasts.push(toast);
+        let excess = toasts.len().saturating_sub(TOASTS_MAX);
+        if excess > 0 {
+            toasts.drain(..excess);
         }
     }
 }
@@ -367,6 +407,11 @@ impl AgentHandle {
     /// The last fatal error from the embedded agent (e.g. failed to register), if any.
     pub fn last_error(&self) -> Option<String> {
         self.shared.last_error.lock().unwrap().clone()
+    }
+
+    /// Drain pending hotkey-feedback toasts (oldest first).
+    pub fn take_toasts(&self) -> Vec<Toast> {
+        std::mem::take(&mut *self.shared.toasts.lock().unwrap())
     }
 
     /// Remote files waiting to be applied (via `Alt+V`), if any. Present in both clipboard
@@ -1975,6 +2020,7 @@ async fn run_ws(
                 let hotkey_cache_dir = cache_dir.clone();
                 let hotkey_clip_ctx = clip_ctx.clone();
                 let paste_after_hotkey = REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY;
+                let hotkey_shared = shared.clone();
                 tokio::spawn(async move {
                     // De-dup state for Alt+C: skip re-publishing an unchanged clipboard (a stale
                     // clipboard the user didn't refresh, or an accidental double-press).
@@ -2009,8 +2055,12 @@ async fn run_ws(
                             .await
                             .with_context(|| format!("{HOTKEY_MOD_NAME}+V failed")),
                         };
-                        if let Err(error) = result {
-                            tracing::warn!(%error, "hotkey action failed");
+                        match result {
+                            Ok(toast) => hotkey_shared.push_toast(toast),
+                            Err(error) => {
+                                tracing::warn!(%error, "hotkey action failed");
+                                hotkey_shared.push_toast(Toast::error(format!("{error:#}")));
+                            }
                         }
                     }
                     tracing::warn!("hotkey listener channel closed");
@@ -2287,7 +2337,7 @@ async fn handle_server_event(
 
 /// Alt+V dispatch. In isolated mode, paste whichever channel arrived most recently — the
 /// inbox text (zero-touch) or the pending remote files — falling back to the other if the chosen
-/// one is empty. In system mode, run the file-paste flow.
+/// one is empty. In system mode, run the file-paste flow. Returns the feedback toast to show.
 #[allow(clippy::too_many_arguments)]
 async fn paste_remote_via_hotkey(
     clip_ctx: &ClipboardCtx,
@@ -2304,25 +2354,20 @@ async fn paste_remote_via_hotkey(
     prefer_relay: bool,
     paste_after_apply: bool,
     cache_dir: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Toast> {
     if clip_ctx.is_isolated() {
         let files_newer = clip_ctx.file_seq.load(Ordering::Relaxed)
             > clip_ctx.inbox_seq.load(Ordering::Relaxed)
             && pending_file_clip.lock().await.is_some();
-        tracing::info!(
-            files_newer,
-            "{HOTKEY_MOD_NAME}+V dispatch: isolated mode, trying {}",
-            if files_newer { "pending files" } else { "inbox text" }
-        );
         // Unless files arrived more recently, try the text inbox first; an empty inbox returns
-        // false so we fall through to the files below.
-        if !files_newer && paste_inbox_text(&clip_ctx.inbox, clipboard, paste).await? {
-            return Ok(());
+        // None so we fall through to the files below.
+        if !files_newer {
+            if let Some(toast) = paste_inbox_text(&clip_ctx.inbox, clipboard, paste).await? {
+                return Ok(toast);
+            }
         }
-    } else {
-        tracing::info!("{HOTKEY_MOD_NAME}+V dispatch: system mode, applying pending file clip");
     }
-    apply_pending_file_clip(
+    let downloaded = apply_pending_file_clip(
         client,
         clipboard,
         device_id,
@@ -2339,17 +2384,22 @@ async fn paste_remote_via_hotkey(
         cache_dir,
     )
     .await?;
-    Ok(())
+    Ok(if downloaded.is_empty() {
+        Toast::error("AirPaste 没有可粘贴的内容".to_string())
+    } else {
+        Toast::info(format!("已接收 {} 个文件", downloaded.len()))
+    })
 }
 
 /// Paste the latest inbox text into the focused app without leaving it on the system
 /// clipboard: save the current clipboard, set ours, synthesize paste, then restore. Returns
-/// `false` (no-op) when the inbox is empty so the caller can fall back to files.
+/// the feedback toast, or `None` (no-op) when the inbox holds no text so the caller can fall
+/// back to files.
 async fn paste_inbox_text(
     inbox: &Mutex<VecDeque<InboxItem>>,
     clipboard: &Clipboard,
     paste: &PasteSimulator,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<Toast>> {
     // Paste the most recent text entry (the inbox also holds file entries; those are pulled
     // via the pending-clip path or the UI's 下载 button, not pasted from here).
     let text = inbox.lock().await.iter().find_map(|item| match &item.kind {
@@ -2357,27 +2407,19 @@ async fn paste_inbox_text(
         InboxItemKind::Files { .. } => None,
     });
     let Some(text) = text else {
-        tracing::info!("{HOTKEY_MOD_NAME}+V: inbox has no text entry, falling back to files");
-        return Ok(false);
+        return Ok(None);
     };
-    tracing::info!(
-        chars = text.chars().count(),
-        "{HOTKEY_MOD_NAME}+V: pasting latest inbox text"
-    );
     let saved = clipboard.get_text().ok().flatten();
     clipboard.set_text(&text)?;
-    tracing::debug!(
-        saved_previous = saved.is_some(),
-        "wrote inbox text to system clipboard"
-    );
     tokio::time::sleep(CLIPBOARD_SETTLE).await;
-    match paste.paste() {
+    let toast = match paste.paste() {
         Ok(()) => {
             tokio::time::sleep(PASTE_CONSUME).await;
             if let Some(previous) = saved {
                 let _ = clipboard.set_text(&previous);
             }
             tracing::info!("pasted AirPaste inbox text");
+            Toast::info("已粘贴")
         }
         Err(error) => {
             // Leave the text on the system clipboard so a manual Cmd+V still works.
@@ -2385,9 +2427,10 @@ async fn paste_inbox_text(
                 %error,
                 "synthetic paste failed; inbox text left on the clipboard for a manual Cmd+V"
             );
+            Toast::error("自动粘贴失败,内容已留在剪贴板,可手动 Cmd+V")
         }
-    }
-    Ok(true)
+    };
+    Ok(Some(toast))
 }
 
 /// Alt+C: publish the current system clipboard to the AirPaste channel. The user copies normally
@@ -2401,27 +2444,27 @@ async fn copy_selection_to_airpaste(
     clipboard: &Clipboard,
     last_pushed: &Mutex<Option<String>>,
     text_clip_ttl_secs: u64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Toast> {
     let Some(text) = clipboard.get_text().ok().flatten() else {
         tracing::warn!(
             "{HOTKEY_MOD_NAME}+C found no clipboard text (copy something with Ctrl/Cmd+C first; \
              over RDP the clipboard can lag several seconds)"
         );
-        return Ok(());
+        return Ok(Toast::error("剪贴板没有文本,请先 Ctrl/Cmd+C 复制"));
     };
     if text.trim().is_empty() {
-        return Ok(());
+        return Ok(Toast::error("剪贴板没有文本,请先 Ctrl/Cmd+C 复制"));
     }
     // Skip when the clipboard is unchanged since our last push: avoids re-sending a stale
     // clipboard the user didn't refresh, and collapses an accidental double Alt+C into one clip.
     if last_pushed.lock().await.as_deref() == Some(text.as_str()) {
         tracing::info!("{HOTKEY_MOD_NAME}+C: clipboard unchanged since last push, skipping");
-        return Ok(());
+        return Ok(Toast::info("内容未变化,无需重发"));
     }
     let response = publish_text_clip(client, device_id, text.clone(), text_clip_ttl_secs).await?;
     *last_pushed.lock().await = Some(text);
     tracing::info!(clip_id = %response.clip_id, "pushed clipboard to AirPaste");
-    Ok(())
+    Ok(Toast::info("已发送到 AirPaste"))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -149,6 +149,8 @@ pub(crate) struct TrayApp {
     pub(crate) pasted_image: Option<PendingImage>,
     // Failure from the paste capture or the off-thread PNG staging; shown on the send tab.
     pub(crate) pasted_image_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    // Hotkey-feedback HUD currently on screen (see `ui::toast`).
+    pub(crate) toast: Option<ui::toast::ActiveToast>,
 }
 
 /// A clipboard bitmap staged on the send tab: the raw pixels for the eventual PNG encode plus
@@ -233,6 +235,7 @@ impl TrayApp {
             send_clear_pending: false,
             pasted_image: None,
             pasted_image_error: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            toast: None,
         }
     }
 
@@ -347,6 +350,9 @@ impl eframe::App for TrayApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
+
+        // Hotkey-feedback HUD (Alt+C / Alt+V): shown as a transient always-on-top floater.
+        ui::toast::update(self, ctx);
 
         // A plain window close (red button / X) hides the window and keeps the app in the tray;
         // only the tray's Quit truly exits.

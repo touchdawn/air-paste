@@ -7,6 +7,7 @@ pub mod tab_devices;
 pub mod tab_inbox;
 pub mod tab_send;
 pub mod tab_settings;
+pub mod toast;
 
 use eframe::egui;
 
