@@ -118,17 +118,57 @@ impl Drop for TransferProgressGuard {
     }
 }
 
-/// Clipboard integration mode plus the isolated-mode inbox (recent remote texts held in-app
-/// instead of being written to the system clipboard, newest first) and arrival markers used to
-/// pick text-vs-files by recency.
+/// Clipboard integration mode plus the in-app inbox (recent remote texts and file clips held
+/// in-app, newest first) and arrival markers used to pick text-vs-files by recency.
 #[derive(Clone)]
 struct ClipboardCtx {
     // Shared so the tray UI can flip the mode at runtime; read live on every poll/apply.
     isolated: Arc<AtomicBool>,
-    inbox: Arc<Mutex<VecDeque<String>>>,
+    inbox: Arc<Mutex<VecDeque<InboxItem>>>,
     // Arrival sequence of the latest isolated inbox text and the latest pending file clip.
     inbox_seq: Arc<AtomicU64>,
     file_seq: Arc<AtomicU64>,
+}
+
+/// One entry in the in-app inbox: a remote text, or a remote file clip the UI can download
+/// on demand (the 下载 button).
+struct InboxItem {
+    /// Arrival sequence of this entry; also the id the UI passes back to act on it.
+    id: u64,
+    kind: InboxItemKind,
+}
+
+enum InboxItemKind {
+    Text(String),
+    Files {
+        clip: PendingFileClip,
+        state: FileDownloadState,
+    },
+}
+
+/// Download lifecycle of a file entry in the inbox.
+#[derive(Clone, Debug)]
+pub enum FileDownloadState {
+    Idle,
+    Downloading,
+    /// Downloaded into the cache (paths held here); the references were also written to the
+    /// system clipboard.
+    Done(Vec<PathBuf>),
+    Failed(String),
+}
+
+/// A UI view of one inbox entry (newest first).
+#[derive(Clone, Debug)]
+pub enum InboxEntry {
+    Text(String),
+    Files {
+        /// Pass to `AgentHandle::download_inbox_files` / `copy_inbox_files`.
+        id: u64,
+        count: usize,
+        total_size: u64,
+        names: Vec<String>,
+        state: FileDownloadState,
+    },
 }
 
 impl ClipboardCtx {
@@ -168,9 +208,40 @@ pub struct DeviceInfo {
 /// on WebSocket connect and every 30s heartbeat, so 90s tolerates a missed beat.
 const PRESENCE_WINDOW_SECS: i64 = 90;
 
+/// Outcome of a UI-initiated send (`AgentHandle::send_text` / `send_files`).
+#[derive(Clone, Debug)]
+pub enum SendStatus {
+    Sending,
+    Sent,
+    Failed(String),
+}
+
+/// Everything a UI-initiated file publish needs from the running agent: the peer-file grant
+/// registry (shared with the peer server), the advertised peer URL, and the transfer limits.
+#[derive(Clone)]
+struct FilePublishCtx {
+    registry: PeerFileRegistry,
+    peer_public_url: String,
+    policy: FileTransferPolicy,
+}
+
+/// Everything a UI-initiated file download needs from the running agent — the same context
+/// the hotkey apply path uses (`apply_file_clip`).
+#[derive(Clone)]
+struct FileApplyCtx {
+    clipboard: Arc<Clipboard>,
+    last_local_file_write: Arc<Mutex<Option<String>>>,
+    identity: Arc<DeviceIdentity>,
+    encryption: Arc<EncryptionIdentity>,
+    policy: FileTransferPolicy,
+    peer_directory: PeerDirectory,
+    prefer_relay: bool,
+    cache_dir: PathBuf,
+}
+
 /// Shared, observable agent state for embedders (the tray UI). Updated by the running agent.
 pub struct AgentShared {
-    inbox: Arc<Mutex<VecDeque<String>>>,
+    inbox: Arc<Mutex<VecDeque<InboxItem>>>,
     connected: AtomicBool,
     device_name: std::sync::Mutex<String>,
     device_id: std::sync::Mutex<Option<String>>,
@@ -193,6 +264,18 @@ pub struct AgentShared {
     // Snapshot of the server's device registry for the UI, refreshed by a background poll while
     // connected. Empty until this device is trusted enough to list devices.
     devices: std::sync::Mutex<Vec<DeviceInfo>>,
+    // Status of the latest UI-initiated text / file send (see `AgentHandle::send_text`,
+    // `AgentHandle::send_files`).
+    send_text: std::sync::Mutex<Option<SendStatus>>,
+    send_files: std::sync::Mutex<Option<SendStatus>>,
+    // Set by the running agent once its peer file server context exists, so the UI can
+    // publish file manifests (drag-and-drop send).
+    file_publish: std::sync::Mutex<Option<FilePublishCtx>>,
+    // Set by the running agent once its download context exists, so the UI can pull inbox
+    // file entries on demand (the 下载 button).
+    file_apply: std::sync::Mutex<Option<FileApplyCtx>>,
+    // Text-clip TTL from the launch args, so UI sends expire like hotkey/poll publishes do.
+    text_clip_ttl_secs: u64,
 }
 
 impl AgentShared {
@@ -214,6 +297,11 @@ impl AgentShared {
             client: std::sync::Mutex::new(None),
             pair_code: std::sync::Mutex::new(None),
             devices: std::sync::Mutex::new(Vec::new()),
+            send_text: std::sync::Mutex::new(None),
+            send_files: std::sync::Mutex::new(None),
+            file_publish: std::sync::Mutex::new(None),
+            file_apply: std::sync::Mutex::new(None),
+            text_clip_ttl_secs: args.text_clip_ttl_secs,
         }
     }
 }
@@ -251,19 +339,20 @@ impl AgentHandle {
 
     /// The most recent remote text held in the isolated-mode inbox, if any.
     pub fn latest_inbox(&self) -> Option<String> {
-        self.shared
-            .inbox
-            .try_lock()
-            .ok()
-            .and_then(|guard| guard.front().cloned())
+        self.shared.inbox.try_lock().ok().and_then(|guard| {
+            guard.iter().find_map(|item| match &item.kind {
+                InboxItemKind::Text(text) => Some(text.clone()),
+                InboxItemKind::Files { .. } => None,
+            })
+        })
     }
 
-    /// Recent isolated-mode inbox texts, newest first (up to `INBOX_HISTORY_MAX`).
-    pub fn inbox_history(&self) -> Vec<String> {
+    /// Recent inbox entries (texts and file clips), newest first (up to `INBOX_HISTORY_MAX`).
+    pub fn inbox_history(&self) -> Vec<InboxEntry> {
         self.shared
             .inbox
             .try_lock()
-            .map(|guard| guard.iter().cloned().collect())
+            .map(|guard| guard.iter().map(inbox_entry_view).collect())
             .unwrap_or_default()
     }
 
@@ -328,6 +417,229 @@ impl AgentHandle {
     /// Dismiss the displayed pair code.
     pub fn clear_pair_code(&self) {
         *self.shared.pair_code.lock().unwrap() = None;
+    }
+
+    /// Publish `text` to all trusted devices, end-to-end encrypted — the UI equivalent of
+    /// `Alt+C`. Non-blocking: the outcome lands in `send_text_status()`. Requires an active
+    /// connection. Like `Alt+C` (and unlike clipboard polling), this skips the sensitive-text
+    /// filter: an explicit send is taken as user intent.
+    pub fn send_text(&self, text: String) {
+        let snapshot = self.shared.client.lock().unwrap().clone();
+        let Some((client, device_id)) = snapshot else {
+            *self.shared.send_text.lock().unwrap() =
+                Some(SendStatus::Failed("尚未连接".to_string()));
+            return;
+        };
+        *self.shared.send_text.lock().unwrap() = Some(SendStatus::Sending);
+        let shared = self.shared.clone();
+        let ttl_secs = self.shared.text_clip_ttl_secs;
+        self.shared.runtime.spawn(async move {
+            let status = match publish_text_clip(&client, &device_id, text, ttl_secs).await {
+                Ok(response) => {
+                    tracing::info!(clip_id = %response.clip_id, "published text clip from UI");
+                    SendStatus::Sent
+                }
+                Err(error) => SendStatus::Failed(format!("{error:#}")),
+            };
+            *shared.send_text.lock().unwrap() = Some(status);
+        });
+    }
+
+    /// Status of the most recent `send_text`, if any.
+    pub fn send_text_status(&self) -> Option<SendStatus> {
+        self.shared.send_text.lock().unwrap().clone()
+    }
+
+    /// Publish a file manifest for `paths` (e.g. files dragged onto the window) — the UI
+    /// equivalent of copying files: recipients see a pending file clip and pull it with
+    /// `Alt+V`. Hashing and publishing run on the agent runtime; the outcome lands in
+    /// `send_files_status()`. Requires an active connection.
+    pub fn send_files(&self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let client_snapshot = self.shared.client.lock().unwrap().clone();
+        let publish_snapshot = self.shared.file_publish.lock().unwrap().clone();
+        let (Some((client, device_id)), Some(publish)) = (client_snapshot, publish_snapshot)
+        else {
+            *self.shared.send_files.lock().unwrap() =
+                Some(SendStatus::Failed("尚未连接".to_string()));
+            return;
+        };
+        *self.shared.send_files.lock().unwrap() = Some(SendStatus::Sending);
+        let shared = self.shared.clone();
+        self.shared.runtime.spawn(async move {
+            let status = match publish_file_manifest(
+                &client,
+                &device_id,
+                &publish.registry,
+                &publish.peer_public_url,
+                &publish.policy,
+                paths,
+            )
+            .await
+            {
+                Ok(()) => SendStatus::Sent,
+                Err(error) => SendStatus::Failed(format!("{error:#}")),
+            };
+            *shared.send_files.lock().unwrap() = Some(status);
+        });
+    }
+
+    /// Status of the most recent `send_files`, if any.
+    pub fn send_files_status(&self) -> Option<SendStatus> {
+        self.shared.send_files.lock().unwrap().clone()
+    }
+
+    /// Download an inbox file entry (the UI 下载 button): pull the files (direct → relay
+    /// fallback) into the cache and write the references to the system clipboard, exactly
+    /// like the `Alt+V` apply. Non-blocking; live progress is visible via
+    /// `transfer_progress()` and the outcome lands in the entry's `FileDownloadState`.
+    pub fn download_inbox_files(&self, id: u64) {
+        let client_snapshot = self.shared.client.lock().unwrap().clone();
+        let apply_snapshot = self.shared.file_apply.lock().unwrap().clone();
+        let shared = self.shared.clone();
+        self.shared.runtime.spawn(async move {
+            let (Some((client, device_id)), Some(ctx)) = (client_snapshot, apply_snapshot)
+            else {
+                set_inbox_file_state(
+                    &shared.inbox,
+                    id,
+                    FileDownloadState::Failed("尚未连接".to_string()),
+                )
+                .await;
+                return;
+            };
+            // Claim the entry (Idle/Failed -> Downloading); a vanished, in-flight, or already
+            // downloaded entry is a no-op.
+            let Some(clip) = claim_inbox_download(&shared.inbox, id).await else {
+                return;
+            };
+            let result = apply_file_clip(
+                &client,
+                &ctx.clipboard,
+                &device_id,
+                &ctx.last_local_file_write,
+                &clip,
+                &ctx.identity,
+                &ctx.encryption,
+                &ctx.policy,
+                &ctx.peer_directory,
+                ctx.prefer_relay,
+                &ctx.cache_dir,
+            )
+            .await;
+            let state = match result {
+                Ok(paths) => {
+                    tracing::info!(file_count = paths.len(), "downloaded inbox file entry");
+                    FileDownloadState::Done(paths)
+                }
+                Err(error) => FileDownloadState::Failed(format!("{error:#}")),
+            };
+            set_inbox_file_state(&shared.inbox, id, state).await;
+        });
+    }
+
+    /// Re-copy an already-downloaded inbox file entry's local paths to the system clipboard
+    /// (the entry's button after a successful download).
+    pub fn copy_inbox_files(&self, id: u64) {
+        let apply_snapshot = self.shared.file_apply.lock().unwrap().clone();
+        let shared = self.shared.clone();
+        self.shared.runtime.spawn(async move {
+            let Some(ctx) = apply_snapshot else {
+                return;
+            };
+            let paths = shared.inbox.lock().await.iter().find_map(|item| {
+                match &item.kind {
+                    InboxItemKind::Files {
+                        state: FileDownloadState::Done(paths),
+                        ..
+                    } if item.id == id => Some(paths.clone()),
+                    _ => None,
+                }
+            });
+            let Some(paths) = paths else {
+                return;
+            };
+            match ctx.clipboard.set_files(&paths) {
+                Ok(()) => {
+                    *ctx.last_local_file_write.lock().await = clipboard_signature(&paths);
+                    tracing::info!(file_count = paths.len(), "copied inbox files to clipboard");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to copy inbox files to clipboard");
+                }
+            }
+        });
+    }
+}
+
+/// Project an internal inbox item into its UI view.
+fn inbox_entry_view(item: &InboxItem) -> InboxEntry {
+    match &item.kind {
+        InboxItemKind::Text(text) => InboxEntry::Text(text.clone()),
+        InboxItemKind::Files { clip, state } => InboxEntry::Files {
+            id: item.id,
+            count: clip.file_clip.files.len(),
+            total_size: clip.file_clip.total_size,
+            names: clip
+                .file_clip
+                .files
+                .iter()
+                .map(|entry| entry.relative_path.clone())
+                .collect(),
+            state: state.clone(),
+        },
+    }
+}
+
+/// Move an Idle/Failed file entry to Downloading and return its clip. `None` when the entry
+/// is gone, not a file entry, already downloading, or already done.
+async fn claim_inbox_download(
+    inbox: &Mutex<VecDeque<InboxItem>>,
+    id: u64,
+) -> Option<PendingFileClip> {
+    let mut guard = inbox.lock().await;
+    let item = guard.iter_mut().find(|item| item.id == id)?;
+    let InboxItemKind::Files { clip, state } = &mut item.kind else {
+        return None;
+    };
+    match state {
+        FileDownloadState::Downloading | FileDownloadState::Done(_) => None,
+        FileDownloadState::Idle | FileDownloadState::Failed(_) => {
+            *state = FileDownloadState::Downloading;
+            Some(clip.clone())
+        }
+    }
+}
+
+/// Set the download state of an inbox file entry by id. Best-effort; a vanished entry is a
+/// no-op.
+async fn set_inbox_file_state(
+    inbox: &Mutex<VecDeque<InboxItem>>,
+    id: u64,
+    state: FileDownloadState,
+) {
+    if let Some(item) = inbox.lock().await.iter_mut().find(|item| item.id == id) {
+        if let InboxItemKind::Files { state: slot, .. } = &mut item.kind {
+            *slot = state;
+        }
+    }
+}
+
+/// Set the download state of the inbox file entry for `clip_id`, so an `Alt+V` apply is
+/// reflected on the matching inbox row (its one-time grant is consumed either way).
+async fn set_inbox_file_state_by_clip(
+    inbox: &Mutex<VecDeque<InboxItem>>,
+    clip_id: &ClipId,
+    state: FileDownloadState,
+) {
+    if let Some(item) = inbox.lock().await.iter_mut().find(
+        |item| matches!(&item.kind, InboxItemKind::Files { clip, .. } if &clip.clip_id == clip_id),
+    ) {
+        if let InboxItemKind::Files { state: slot, .. } = &mut item.kind {
+            *slot = state;
+        }
     }
 }
 
@@ -528,6 +840,13 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         .peer_public_url
         .clone()
         .unwrap_or_else(|| format!("http://{}", args.peer_bind));
+    // Let the UI publish file manifests (drag-and-drop send) through the same grant registry
+    // the peer server serves from.
+    *shared.file_publish.lock().unwrap() = Some(FilePublishCtx {
+        registry: peer_registry.clone(),
+        peer_public_url: peer_public_url.clone(),
+        policy: file_policy.clone(),
+    });
     let peer_task = tokio::spawn(run_peer_server(args.peer_bind, peer_registry.clone()));
 
     let (_mdns_daemon, peer_directory) =
@@ -541,6 +860,19 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
 
     let ws_peer_registry = peer_registry.clone();
     let prefer_relay = args.prefer_relay;
+
+    // Let the UI download inbox file entries on demand (the 下载 button), with the same
+    // context the hotkey apply path uses.
+    *shared.file_apply.lock().unwrap() = Some(FileApplyCtx {
+        clipboard: clipboard.clone(),
+        last_local_file_write: last_local_file_write.clone(),
+        identity: identity.clone(),
+        encryption: encryption.clone(),
+        policy: file_policy.clone(),
+        peer_directory: peer_directory.clone(),
+        prefer_relay,
+        cache_dir: cache_dir.clone(),
+    });
 
     let poll_task = if args.publish_clipboard {
         tokio::spawn(poll_clipboard(
@@ -1715,12 +2047,16 @@ async fn handle_server_event(
                         // Isolated mode: keep the text in the in-app inbox (newest first,
                         // bounded history); the system clipboard is left untouched until the
                         // user presses Alt+V.
+                        let seq = next_arrival_seq();
                         {
                             let mut inbox = clip_ctx.inbox.lock().await;
-                            inbox.push_front(text);
+                            inbox.push_front(InboxItem {
+                                id: seq,
+                                kind: InboxItemKind::Text(text),
+                            });
                             inbox.truncate(INBOX_HISTORY_MAX);
                         }
-                        clip_ctx.inbox_seq.store(next_arrival_seq(), Ordering::Relaxed);
+                        clip_ctx.inbox_seq.store(seq, Ordering::Relaxed);
                         tracing::info!("stored remote text in isolated inbox");
                     } else {
                         clipboard.set_text(&text)?;
@@ -1749,12 +2085,27 @@ async fn handle_server_event(
                 total_size = file_clip.total_size,
                 "remote file clipboard available"
             );
-            *pending_file_clip.lock().await = Some(PendingFileClip {
+            let pending = PendingFileClip {
                 clip_id: pending_clip_id,
                 source_device_id: pending_source_device_id,
                 file_clip,
-            });
-            clip_ctx.file_seq.store(next_arrival_seq(), Ordering::Relaxed);
+            };
+            *pending_file_clip.lock().await = Some(pending.clone());
+            // Also record it in the inbox so the UI can download it on demand (下载 button),
+            // independent of the single "latest pending" Alt+V slot.
+            let seq = next_arrival_seq();
+            {
+                let mut inbox = clip_ctx.inbox.lock().await;
+                inbox.push_front(InboxItem {
+                    id: seq,
+                    kind: InboxItemKind::Files {
+                        clip: pending,
+                        state: FileDownloadState::Idle,
+                    },
+                });
+                inbox.truncate(INBOX_HISTORY_MAX);
+            }
+            clip_ctx.file_seq.store(seq, Ordering::Relaxed);
             if auto_apply_files {
                 apply_pending_file_clip(
                     client,
@@ -1762,6 +2113,7 @@ async fn handle_server_event(
                     device_id,
                     last_local_file_write,
                     pending_file_clip,
+                    &clip_ctx.inbox,
                     paste,
                     identity,
                     encryption,
@@ -1846,6 +2198,7 @@ async fn paste_remote_via_hotkey(
         device_id,
         last_local_file_write,
         pending_file_clip,
+        &clip_ctx.inbox,
         paste,
         identity,
         encryption,
@@ -1863,12 +2216,17 @@ async fn paste_remote_via_hotkey(
 /// clipboard: save the current clipboard, set ours, synthesize paste, then restore. Returns
 /// `false` (no-op) when the inbox is empty so the caller can fall back to files.
 async fn paste_inbox_text(
-    inbox: &Mutex<VecDeque<String>>,
+    inbox: &Mutex<VecDeque<InboxItem>>,
     clipboard: &Clipboard,
     paste: &PasteSimulator,
 ) -> anyhow::Result<bool> {
-    // Paste the most recent inbox entry (newest first).
-    let Some(text) = inbox.lock().await.front().cloned() else {
+    // Paste the most recent text entry (the inbox also holds file entries; those are pulled
+    // via the pending-clip path or the UI's 下载 button, not pasted from here).
+    let text = inbox.lock().await.iter().find_map(|item| match &item.kind {
+        InboxItemKind::Text(text) => Some(text.clone()),
+        InboxItemKind::Files { .. } => None,
+    });
+    let Some(text) = text else {
         return Ok(false);
     };
     let saved = clipboard.get_text().ok().flatten();
@@ -1924,6 +2282,7 @@ async fn apply_pending_file_clip(
     requester_device_id: &DeviceId,
     last_local_file_write: &Mutex<Option<String>>,
     pending_file_clip: &Mutex<Option<PendingFileClip>>,
+    inbox: &Mutex<VecDeque<InboxItem>>,
     paste: &PasteSimulator,
     identity: &DeviceIdentity,
     encryption: &EncryptionIdentity,
@@ -1952,6 +2311,14 @@ async fn apply_pending_file_clip(
     )
     .await?;
     *pending_file_clip.lock().await = None;
+    // Reflect the apply on the matching inbox row: its one-time grants are consumed now, so
+    // the UI's 下载 button must become the already-downloaded state instead of a doomed retry.
+    set_inbox_file_state_by_clip(
+        inbox,
+        &pending.clip_id,
+        FileDownloadState::Done(downloaded_files.clone()),
+    )
+    .await;
     if paste_after_apply {
         tokio::time::sleep(Duration::from_millis(120)).await;
         paste.paste()?;

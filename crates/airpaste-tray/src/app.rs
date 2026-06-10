@@ -5,7 +5,7 @@
 
 use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 
-use airpaste_agent::AgentHandle;
+use airpaste_agent::{AgentHandle, FileDownloadState, InboxEntry, SendStatus};
 use eframe::egui;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
@@ -134,6 +134,10 @@ struct TrayApp {
     autostart: bool,
     // Embedded control-plane server (the "run a server on this machine" toggle).
     server: ServerController,
+    // Manual "send text" panel: the draft, and whether the draft should be cleared once the
+    // in-flight send reports Sent (kept on failure so the user can retry).
+    send_input: String,
+    send_clear_pending: bool,
 }
 
 /// Install a CJK-capable font as the primary UI font so Chinese text renders (egui's default
@@ -201,6 +205,8 @@ impl TrayApp {
             pair_code_cleared: false,
             autostart: crate::autostart::is_autostart_enabled(),
             server,
+            send_input: String::new(),
+            send_clear_pending: false,
         }
     }
 
@@ -275,6 +281,35 @@ impl eframe::App for TrayApp {
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        // OS drag-and-drop: files dropped anywhere on the window are published as a file
+        // manifest (recipients pull them with the remote-paste hotkey, like a copied file).
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.agent.send_files(dropped);
+        }
+        // While files hover over the window, dim it with a drop hint.
+        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("file-drop-overlay"),
+            ));
+            let rect = ctx.screen_rect();
+            painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(160));
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "松开以发送文件",
+                egui::FontId::proportional(22.0),
+                egui::Color32::WHITE,
+            );
         }
 
         // Once the (re)connection succeeds, drop the one-shot pair code from the saved config so
@@ -519,7 +554,70 @@ impl eframe::App for TrayApp {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
-            ui.label("收件箱(隔离,最新在上):");
+            ui.label("发送文字到其它设备:");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.send_input)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("输入或粘贴要发送的文字…"),
+            );
+            ui.horizontal(|ui| {
+                let can_send = self.agent.connected() && !self.send_input.trim().is_empty();
+                if ui.add_enabled(can_send, egui::Button::new("发送")).clicked() {
+                    self.agent.send_text(self.send_input.clone());
+                    self.send_clear_pending = true;
+                }
+                if !self.agent.connected() {
+                    ui.weak("(需先连接)");
+                }
+                match self.agent.send_text_status() {
+                    Some(SendStatus::Sending) => {
+                        ui.weak("发送中…");
+                    }
+                    Some(SendStatus::Sent) => {
+                        if self.send_clear_pending {
+                            self.send_clear_pending = false;
+                            self.send_input.clear();
+                        }
+                        ui.colored_label(egui::Color32::from_rgb(0x2e, 0xb8, 0x72), "✓ 已发送");
+                    }
+                    Some(SendStatus::Failed(error)) => {
+                        self.send_clear_pending = false;
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0xd9, 0x3a, 0x3a),
+                            format!("✗ 发送失败:{}", preview(&error)),
+                        );
+                    }
+                    None => {}
+                }
+            });
+            ui.weak("提示:把文件或文件夹拖进窗口即可发送文件。");
+            match self.agent.send_files_status() {
+                Some(SendStatus::Sending) => {
+                    ui.weak("文件处理中…(大文件需要先计算校验和)");
+                }
+                Some(SendStatus::Sent) => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0x2e, 0xb8, 0x72),
+                        format!(
+                            "✓ 文件已发出(对方按 {}+V 接收)",
+                            airpaste_agent::HOTKEY_MOD_NAME
+                        ),
+                    );
+                }
+                Some(SendStatus::Failed(error)) => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xd9, 0x3a, 0x3a),
+                        format!("✗ 文件发送失败:{}", preview(&error)),
+                    );
+                }
+                None => {}
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.label("收件箱(最新在上):");
             let history = self.agent.inbox_history();
             if history.is_empty() {
                 ui.weak("(暂无)");
@@ -529,13 +627,70 @@ impl eframe::App for TrayApp {
                     .max_height(180.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        for (i, text) in history.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                if ui.button("复制").clicked() {
-                                    ctx.copy_text(text.clone());
+                        for (i, entry) in history.iter().enumerate() {
+                            match entry {
+                                InboxEntry::Text(text) => {
+                                    ui.horizontal(|ui| {
+                                        if ui.button("复制").clicked() {
+                                            ctx.copy_text(text.clone());
+                                        }
+                                        ui.label(preview(text));
+                                    });
                                 }
-                                ui.label(preview(text));
-                            });
+                                InboxEntry::Files {
+                                    id,
+                                    count,
+                                    total_size,
+                                    names,
+                                    state,
+                                } => {
+                                    ui.horizontal(|ui| {
+                                        match state {
+                                            FileDownloadState::Idle => {
+                                                if ui.button("下载").clicked() {
+                                                    self.agent.download_inbox_files(*id);
+                                                }
+                                            }
+                                            FileDownloadState::Downloading => {
+                                                ui.add_enabled(
+                                                    false,
+                                                    egui::Button::new("下载中…"),
+                                                );
+                                            }
+                                            // Downloaded: the button re-copies the local file
+                                            // references to the clipboard.
+                                            FileDownloadState::Done(_) => {
+                                                if ui.button("复制").clicked() {
+                                                    self.agent.copy_inbox_files(*id);
+                                                }
+                                            }
+                                            FileDownloadState::Failed(_) => {
+                                                if ui.button("重试").clicked() {
+                                                    self.agent.download_inbox_files(*id);
+                                                }
+                                            }
+                                        }
+                                        ui.label(format!(
+                                            "🗂 {} 个文件(共 {}):{}",
+                                            count,
+                                            human_size(*total_size),
+                                            preview(&names.join(", "))
+                                        ));
+                                    });
+                                    match state {
+                                        FileDownloadState::Done(_) => {
+                                            ui.weak("已下载,文件引用已放入剪贴板,可直接粘贴。");
+                                        }
+                                        FileDownloadState::Failed(error) => {
+                                            ui.colored_label(
+                                                egui::Color32::from_rgb(0xd9, 0x3a, 0x3a),
+                                                format!("✗ 下载失败:{}", preview(error)),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
                             if i + 1 < history.len() {
                                 ui.separator();
                             }
