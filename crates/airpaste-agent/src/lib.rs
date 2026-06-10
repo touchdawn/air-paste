@@ -687,7 +687,7 @@ async fn set_inbox_file_state_by_clip(
 
 /// Initialize tracing to stderr. Safe to call once per process; a second call is ignored.
 pub fn init_tracing() {
-    let _ = tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "airpaste_agent=debug".into()),
@@ -695,8 +695,32 @@ pub fn init_tracing() {
         // Log to stderr (unbuffered): keeps stdout for data output (e.g. --print-latest-clip
         // JSON) and ensures a long-running agent's logs flush promptly when redirected to a
         // file, which block-buffered stdout does not do on Windows.
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .try_init();
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+    // A bundled .app launched from Finder has no visible stderr, so also append to
+    // <app support>/agent.log (best-effort; skipped if the file cannot be opened).
+    let log_file = {
+        let dir = app_support_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("agent.log"))
+            .ok()
+    };
+    match log_file {
+        Some(file) => {
+            let _ = registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(std::sync::Mutex::new(file)),
+                )
+                .try_init();
+        }
+        None => {
+            let _ = registry.try_init();
+        }
+    }
 }
 
 /// Parse agent arguments from the process command line (so embedders need no `clap` dep).
@@ -899,7 +923,10 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         tracing::info!(
             "clipboard isolated mode: {HOTKEY_MOD_NAME}+C publishes the current clipboard, {HOTKEY_MOD_NAME}+V pastes from AirPaste"
         );
-        if !paste.accessibility_trusted() {
+        // When untrusted this pops the system dialog that registers the app in the
+        // Accessibility list, so the user only has to flip the toggle (needed again after
+        // every rebuild: the TCC grant is keyed to the binary's code signature).
+        if !paste.request_accessibility() {
             tracing::warn!(
                 "isolated mode's {HOTKEY_MOD_NAME}+V needs Accessibility permission to paste into \
                  other apps; grant it in System Settings -> Privacy & Security -> Accessibility, then restart"
@@ -2282,11 +2309,18 @@ async fn paste_remote_via_hotkey(
         let files_newer = clip_ctx.file_seq.load(Ordering::Relaxed)
             > clip_ctx.inbox_seq.load(Ordering::Relaxed)
             && pending_file_clip.lock().await.is_some();
+        tracing::info!(
+            files_newer,
+            "{HOTKEY_MOD_NAME}+V dispatch: isolated mode, trying {}",
+            if files_newer { "pending files" } else { "inbox text" }
+        );
         // Unless files arrived more recently, try the text inbox first; an empty inbox returns
         // false so we fall through to the files below.
         if !files_newer && paste_inbox_text(&clip_ctx.inbox, clipboard, paste).await? {
             return Ok(());
         }
+    } else {
+        tracing::info!("{HOTKEY_MOD_NAME}+V dispatch: system mode, applying pending file clip");
     }
     apply_pending_file_clip(
         client,
@@ -2323,17 +2357,36 @@ async fn paste_inbox_text(
         InboxItemKind::Files { .. } => None,
     });
     let Some(text) = text else {
+        tracing::info!("{HOTKEY_MOD_NAME}+V: inbox has no text entry, falling back to files");
         return Ok(false);
     };
+    tracing::info!(
+        chars = text.chars().count(),
+        "{HOTKEY_MOD_NAME}+V: pasting latest inbox text"
+    );
     let saved = clipboard.get_text().ok().flatten();
     clipboard.set_text(&text)?;
+    tracing::debug!(
+        saved_previous = saved.is_some(),
+        "wrote inbox text to system clipboard"
+    );
     tokio::time::sleep(CLIPBOARD_SETTLE).await;
-    paste.paste()?;
-    tokio::time::sleep(PASTE_CONSUME).await;
-    if let Some(previous) = saved {
-        let _ = clipboard.set_text(&previous);
+    match paste.paste() {
+        Ok(()) => {
+            tokio::time::sleep(PASTE_CONSUME).await;
+            if let Some(previous) = saved {
+                let _ = clipboard.set_text(&previous);
+            }
+            tracing::info!("pasted AirPaste inbox text");
+        }
+        Err(error) => {
+            // Leave the text on the system clipboard so a manual Cmd+V still works.
+            tracing::warn!(
+                %error,
+                "synthetic paste failed; inbox text left on the clipboard for a manual Cmd+V"
+            );
+        }
     }
-    tracing::info!("pasted AirPaste inbox text");
     Ok(true)
 }
 

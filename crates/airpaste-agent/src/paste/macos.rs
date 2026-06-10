@@ -14,9 +14,18 @@
 //!   2. post via a combined-session-state `CGEventSource` to `kCGAnnotatedSessionEventTap`,
 //!      filtering local keyboard events during the post's suppression interval.
 
-use core_foundation_sys::base::CFRelease;
+use core_foundation_sys::{
+    base::CFRelease,
+    dictionary::{
+        kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionaryCreate,
+        CFDictionaryRef,
+    },
+    number::kCFBooleanTrue,
+    string::CFStringRef,
+};
 use std::{
     ffi::c_void,
+    ptr::null,
     time::{Duration, Instant},
 };
 
@@ -71,6 +80,8 @@ extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> u8;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
 }
 
 pub struct PasteSimulator;
@@ -85,27 +96,70 @@ impl PasteSimulator {
         unsafe { AXIsProcessTrusted() != 0 }
     }
 
+    /// Like `accessibility_trusted`, but when untrusted asks macOS to show the system
+    /// dialog that registers this app in the Accessibility list and offers to open
+    /// System Settings. The grant is keyed to the binary's code signature, so it must be
+    /// re-confirmed after every rebuild of an ad-hoc-signed bundle.
+    pub fn request_accessibility(&self) -> bool {
+        unsafe {
+            let keys = [kAXTrustedCheckOptionPrompt as *const c_void];
+            let values = [kCFBooleanTrue as *const c_void];
+            let options = CFDictionaryCreate(
+                null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
+            let trusted = AXIsProcessTrustedWithOptions(options) != 0;
+            if !options.is_null() {
+                CFRelease(options as *const c_void);
+            }
+            trusted
+        }
+    }
+
     /// Synthesize Command+V (paste into the focused app).
     pub fn paste(&self) -> anyhow::Result<()> {
+        if !self.accessibility_trusted() {
+            anyhow::bail!(
+                "AirPaste lacks Accessibility permission, so macOS silently drops synthetic \
+                 keystrokes. Grant (or re-toggle after an app update) System Settings -> \
+                 Privacy & Security -> Accessibility -> AirPaste, then restart the app"
+            );
+        }
         wait_for_modifier_release();
-        post_command_chord(KEY_V)
+        post_command_chord(KEY_V)?;
+        tracing::debug!("posted synthetic Cmd+V");
+        Ok(())
     }
 }
 
 /// Block (bounded) until the user releases the physical modifier keys held from the
 /// triggering hotkey. Best-effort: on timeout the paste proceeds anyway.
 fn wait_for_modifier_release() {
-    let deadline = Instant::now() + MODIFIER_RELEASE_TIMEOUT;
+    let start = Instant::now();
+    let initial = unsafe { CGEventSourceFlagsState(KCG_EVENT_SOURCE_STATE_COMBINED_SESSION) }
+        & MODIFIER_FLAGS;
+    let deadline = start + MODIFIER_RELEASE_TIMEOUT;
+    let mut timed_out = false;
     while unsafe { CGEventSourceFlagsState(KCG_EVENT_SOURCE_STATE_COMBINED_SESSION) }
         & MODIFIER_FLAGS
         != 0
     {
         if Instant::now() >= deadline {
-            tracing::debug!("modifier keys still held after timeout; pasting anyway");
+            timed_out = true;
             break;
         }
         std::thread::sleep(MODIFIER_RELEASE_POLL);
     }
+    tracing::debug!(
+        initial_flags = format_args!("{initial:#x}"),
+        waited_ms = start.elapsed().as_millis() as u64,
+        timed_out,
+        "modifier release wait finished"
+    );
 }
 
 /// Post a Command+<key> chord. The Command flag is set explicitly on each event so the

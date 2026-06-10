@@ -9,7 +9,8 @@ impl PasteSimulator {
         Self
     }
 
-    pub fn accessibility_trusted(&self) -> bool {
+    /// No-op on Windows (no Accessibility gate); see the macOS implementation.
+    pub fn request_accessibility(&self) -> bool {
         true
     }
 

@@ -19,7 +19,7 @@ impl PasteSimulator {
         Self
     }
 
-    pub fn accessibility_trusted(&self) -> bool {
+    pub fn request_accessibility(&self) -> bool {
         true
     }
 
