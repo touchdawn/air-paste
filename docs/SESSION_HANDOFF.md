@@ -797,10 +797,20 @@ in-window pairing/config (persisted `TrayConfig` + re-exec reconnect), start-at-
 lightweight packaging (`bundle-macos.sh` / `install-windows.ps1`), build-version footer,
 peer-port bind retry, the connected-devices view, **and the manual send panel (text box +
 drag-drop files) + per-entry inbox file download (`cd58f10`, verified cross-machine)** — see
-"Menu-bar UI". Next: a real-hardware pass on the config-panel「保存并连接」→ re-exec and the
+"Menu-bar UI". **2026-06-10: the window was redesigned from one stacked column into a
+settings-dialog layout** (modeled on macOS Microsoft Remote Desktop's Edit PC sheet): a
+persistent header (logo + connection state) over four tabs — 发送 (draft + visible dashed
+drop zone), 收件箱 (pending banner, progress, history), 设备 (list + pairing moved here),
+设置 (right-aligned form labels via `ui::form_row`, option checkbox group, accent 保存并连接
+bottom-right). New modules: `theme.rs` (color tokens + egui dark/light `Visuals` tuning —
+add tokens there, do not hardcode colors), `icon.rs` (tray/window icon + header logo), and
+`ui/` (header + one module per tab + shared form/list/badge primitives); `app.rs` keeps only
+state, chrome, and routing. Window is 460×560; all four tabs verified on macOS by
+screenshot. Next: a real-hardware pass on the config-panel「保存并连接」→ re-exec and the
 「开机自启」toggle; a designed PNG/`.icns` logo; richer pairing UX (device fingerprint
 compare); a way to remove orphaned devices (there is no `DELETE /v1/devices` — stale
-"Windows Agent" entries from the old CWD-state bug remain in the device list forever).
+"Windows Agent" entries from the old CWD-state bug remain in the device list forever);
+re-verify the new tab UI on the Windows build (shared code, but fonts/DPI differ).
 
 ### 3d. Windows UI — DONE (2026-06-08), minor click-test follow-up
 
