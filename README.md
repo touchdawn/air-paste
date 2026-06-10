@@ -49,7 +49,7 @@ To switch: toggle the "Isolated mode" checkbox in the tray window, or start the 
 
 You need two devices, A and B. A also acts as the server.
 
-Build and launch the tray app on each device (prebuilt installers are not provided yet):
+Build and launch the tray app on each device (no official installers yet; on Windows you can package a portable build for other machines, see "Building" below):
 
 ```bash
 # macOS
@@ -57,8 +57,8 @@ scripts/bundle-macos.sh && open dist/AirPaste.app
 ```
 
 ```powershell
-# Windows (set up the toolchain first, see "Building" below)
-cargo +stable-x86_64-pc-windows-gnu run -p airpaste-tray
+# Windows: pull + build + start the tray in one go (set up the toolchain first, see "Building" below)
+powershell -ExecutionPolicy Bypass -File .\scripts\update-build-run-windows.ps1
 ```
 
 Then, all in the tray window:
@@ -88,6 +88,22 @@ Windows (first time, installs Rust + a portable WinLibs MinGW toolchain under `t
 $env:PATH = "$(Get-Location)\tools\winlibs\mingw64\bin;$env:PATH"
 cargo +stable-x86_64-pc-windows-gnu build -p airpaste-tray -p airpaste-server -p airpaste-agent
 ```
+
+Windows day-to-day update and packaging scripts:
+
+```powershell
+# Pull latest code + build the whole workspace + restart the tray in one go (add -Release for a release build)
+powershell -ExecutionPolicy Bypass -File .\scripts\update-build-run-windows.ps1
+
+# Package a Windows portable build: release-builds the tray and produces
+# dist\AirPaste-portable-<commit>-windows\ (AirPaste.exe + README.txt) plus a matching zip.
+# Add -IncludeCli to bundle airpaste-agent.exe / airpaste-server.exe as well.
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-portable.ps1
+```
+
+The portable zip can be copied to any other Windows machine and run after unzipping — no Rust required there. Settings and device identity live under `%APPDATA%\AirPaste`; to upgrade, quit the tray and replace the folder with a newer build.
+
+> Note: both scripts default to the MSVC toolchain (`1.88.0-x86_64-pc-windows-msvc`). If you use the GNU/WinLibs toolchain from above, pass `-Toolchain stable-x86_64-pc-windows-gnu`; `-Proxy` is supported as well.
 
 ## Design goals
 

@@ -49,7 +49,7 @@ AirPaste 与系统剪贴板完全解耦，收发都由你显式触发：
 
 准备两台设备 A、B，A 兼作服务器。
 
-先在每台设备上编译并启动托盘应用（暂未提供安装包）：
+先在每台设备上编译并启动托盘应用（暂未提供官方安装包；Windows 可以自行打包便携版分发给其他机器，见下文「编译」）：
 
 ```bash
 # macOS
@@ -57,8 +57,8 @@ scripts/bundle-macos.sh && open dist/AirPaste.app
 ```
 
 ```powershell
-# Windows（需先准备工具链，见下文「编译」）
-cargo +stable-x86_64-pc-windows-gnu run -p airpaste-tray
+# Windows：一键拉取 + 编译 + 启动托盘（需先准备工具链，见下文「编译」）
+powershell -ExecutionPolicy Bypass -File .\scripts\update-build-run-windows.ps1
 ```
 
 接下来全部在托盘窗口里操作：
@@ -88,6 +88,22 @@ Windows（首次运行会安装 Rust，并在 `tools/winlibs` 下下载便携版
 $env:PATH = "$(Get-Location)\tools\winlibs\mingw64\bin;$env:PATH"
 cargo +stable-x86_64-pc-windows-gnu build -p airpaste-tray -p airpaste-server -p airpaste-agent
 ```
+
+Windows 日常更新与打包脚本：
+
+```powershell
+# 一键拉取最新代码 + 编译整个 workspace + 重启托盘（加 -Release 用 release 构建）
+powershell -ExecutionPolicy Bypass -File .\scripts\update-build-run-windows.ps1
+
+# 打包 Windows 便携版：release 编译托盘并生成
+# dist\AirPaste-portable-<commit>-windows\（含 AirPaste.exe 和 README.txt）及同名 zip
+# 加 -IncludeCli 把 airpaste-agent.exe / airpaste-server.exe 一并打入
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-portable.ps1
+```
+
+便携版 zip 可以直接拷到其他 Windows 机器解压运行，对方无需安装 Rust。配置和设备身份存放在 `%APPDATA%\AirPaste`，升级时退出托盘后用新包覆盖整个文件夹即可。
+
+> 注意：这两个脚本默认使用 MSVC 工具链（`1.88.0-x86_64-pc-windows-msvc`）。如果你用的是上面的 GNU/WinLibs 工具链，请传 `-Toolchain stable-x86_64-pc-windows-gnu`，需要代理时同样支持 `-Proxy`。
 
 ## 设计目标
 
