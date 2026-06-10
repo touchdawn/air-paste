@@ -120,13 +120,42 @@ macOS menu-bar UI:
       online dots, 本机/未信任 markers, and a human last-seen. Mainly useful when this host
       runs the embedded server.
 
+15. **Manual send & inbox download from the tray window** — commit `cd58f10`, verified
+    cross-machine on real Mac↔Windows hardware (see "Real-Machine Validation (2026-06-10)").
+    Three features:
+    - **Text send box** (发送文字到其它设备): `AgentHandle::send_text` publishes E2EE text
+      through the existing `publish_text_clip`. Like `Alt+C` it skips the sensitive-text
+      filter (an explicit send is user intent). The UI polls a `SendStatus`
+      (Sending/Sent/Failed); the draft clears only on success.
+    - **Drag-and-drop file send**: files/folders dropped anywhere on the window publish a
+      manifest via `AgentHandle::send_files` (egui `dropped_files`; hovering shows a dim
+      "松开以发送文件" overlay). `run()` exposes a `FilePublishCtx` (the peer server's grant
+      registry + advertised peer URL + limits) so UI publishes serve from the same registry.
+    - **Inbox holds file clips with per-entry download**: the inbox is now
+      `VecDeque<InboxItem>` (text or file entries; label 收件箱(最新在上)). A file entry's
+      下载 button runs `AgentHandle::download_inbox_files` → the same `apply_file_clip`
+      path as `Alt+V` (direct → relay fallback, hash verify, refs written to the
+      clipboard), using a `FileApplyCtx` published by `run()`. Button states:
+      下载 → 下载中… → 复制 (re-copies the cached paths without re-transfer,
+      `copy_inbox_files`) / 重试 on failure (a failed stream releases its one-time grant).
+      An `Alt+V` apply marks the matching inbox row Done so its button cannot retry
+      already-consumed grants.
+16. **Per-user default state/cache paths on Windows** — commit `660c14b`, fixed from the
+    Windows side after the CWD-relative `./.airpaste-agent.json` default minted yet another
+    orphan device during cross-machine verification. Windows now defaults to
+    `%APPDATA%\AirPaste\agent.json` (state) and `%LOCALAPPDATA%\AirPaste\cache` (cache),
+    with a log-only migration hint when a legacy CWD file exists. See "Current Desktop
+    Agent Behavior".
+
 Known stale after the hotkey change: `scripts/smoke-hotkey-macos.sh` waits for the log line
 `registered remote paste hotkey Ctrl+Shift+V`, but the agent now logs `Option+V` — that
 interactive smoke will hang at the log wait until updated. `smoke-isolated-hotkey.ps1`,
 `smoke-isolated.ps1`, and `smoke-isolated-macos.sh` also still tell the operator to press the
 old `Ctrl+Shift` chords in their prompts/comments (the headless assertions are unaffected).
 
-Recent commits (newest first): `f86f6a0` tray devices view; `5a9ddfd` + `99bc776` build id in
+Recent commits (newest first): `660c14b` per-user Windows state/cache paths; `cd58f10`
+manual send (text box + drag-drop files) + inbox file download; `6e8d270` handoff/README
+refresh; `f86f6a0` tray devices view; `5a9ddfd` + `99bc776` build id in
 the footer, peer-port bind-retry, keep the Windows taskbar button; `a351b50` Alt+C publishes
 the current clipboard; `a662481` Alt+C/Alt+V rebind + 6-digit pair codes; `5d9bc82` Alt+C
 de-dup vs stale clipboard; `13cb52a` embedded server from the window; `3dd689d` pair code
@@ -502,6 +531,33 @@ content). It also creates a publish feedback loop if the sender runs with
 `--publish-clipboard=true`. To verify system-clipboard landing cleanly, disable clipboard
 redirection in mstsc (Local Resources -> uncheck Clipboard) and retest.
 
+## Real-Machine Validation (2026-06-10): tray manual send / inbox download
+
+Full cross-machine verification of `cd58f10` + `660c14b` between the real Mac
+(`192.168.50.199`, tray with embedded server on `:8080`) and the real Windows machine
+(release tray installed to `%LOCALAPPDATA%\AirPaste`), all PASS:
+
+- **State-path migration**: Windows identity moved from the legacy CWD file to
+  `%APPDATA%\AirPaste\agent.json`; relaunch kept the same `device_id`, reconnected with no
+  re-pairing and no migration warn.
+- **Text send box** Win→Mac: Chinese text (IME) typed into the window, ✓ 已发送, draft
+  cleared, `published text clip from UI`, received on the Mac.
+- **Drag-and-drop file send** Win→Mac: hover overlay shown, ✓ 文件已发出,
+  `published file manifest`.
+- **Inbox download** Mac→Win: 🗂 entry appeared, 下载 → 下载中… → 复制;
+  `downloaded inbox file entry`, file verified on disk via Explorer paste. A second 复制
+  click re-copied from cache with **no** re-transfer (`copied inbox files to clipboard`,
+  `downloaded remote file` count unchanged).
+- **Alt+V interlock**: a second Mac→Win file pulled via `Alt+V` (not the button) auto-marked
+  the matching inbox row as downloaded (button became 复制).
+- **Regression**: `Alt+C` publish and `Alt+V` text paste still work
+  (`pushed clipboard to AirPaste`, `pasted AirPaste inbox text`).
+
+Operational note from this run: the **embedded server has no auth token**
+(`ServerController` passes `None`), so a `403` from `/v1/*` means "device not trusted" —
+pair the device; do not hunt for a bearer token (a missing token would be `401`, and only if
+the server enabled one).
+
 ## Menu-bar UI (`airpaste-tray`)
 
 A cross-platform menu-bar / tray app (egui/eframe window + `tray-icon` menu) that embeds the
@@ -532,10 +588,12 @@ The window (Chinese UI) shows: a three-state connection status (● 已连接 / 
 ○ 连接中…), device + device id, checkboxes for **isolated mode** (runtime toggle), **start at
 login**, and **run an embedded server**, a collapsible **device list** (设备 N/M 在线, online
 dot / 本机 / 未信任 / last-seen per row), the **settings & pairing panel** (server URL / pair
-code / auth token +「保存并连接」+「生成配对码」), a **transfer progress bar**, **pending
-files** (count/size/names + the Alt+V hint), the **inbox history** (newest first, per-entry
-copy), and a pinned **build-version footer** (`v<ver> · <git-hash> · <date>`, `+` = dirty
-tree). The tray menu has 显示 / 退出.
+code / auth token +「保存并连接」+「生成配对码」), a **manual send panel** (text box +
+发送; dropping files/folders anywhere on the window sends them), a **transfer progress bar**,
+**pending files** (count/size/names + the Alt+V hint), the **inbox history** (newest first;
+text entries with per-entry 复制, file entries with 下载 → 复制/重试), and a pinned
+**build-version footer** (`v<ver> · <git-hash> · <date>`, `+` = dirty tree). The tray menu
+has 显示 / 退出.
 
 Implemented:
 
@@ -737,9 +795,12 @@ Done: scaffold + agent wiring, Chinese UI (CJK font), menu-bar-only (accessory, 
 runtime isolated-mode toggle, **real app icon, inbox history, connection-error display,
 in-window pairing/config (persisted `TrayConfig` + re-exec reconnect), start-at-login toggle,
 lightweight packaging (`bundle-macos.sh` / `install-windows.ps1`), build-version footer,
-peer-port bind retry, and the connected-devices view** — see "Menu-bar UI". Next: a
-real-hardware pass on the config-panel「保存并连接」→ re-exec and the「开机自启」toggle; a designed
-PNG/`.icns` logo; richer pairing UX (device fingerprint compare).
+peer-port bind retry, the connected-devices view, **and the manual send panel (text box +
+drag-drop files) + per-entry inbox file download (`cd58f10`, verified cross-machine)** — see
+"Menu-bar UI". Next: a real-hardware pass on the config-panel「保存并连接」→ re-exec and the
+「开机自启」toggle; a designed PNG/`.icns` logo; richer pairing UX (device fingerprint
+compare); a way to remove orphaned devices (there is no `DELETE /v1/devices` — stale
+"Windows Agent" entries from the old CWD-state bug remain in the device list forever).
 
 ### 3d. Windows UI — DONE (2026-06-08), minor click-test follow-up
 
