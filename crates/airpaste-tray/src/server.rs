@@ -27,7 +27,7 @@ pub struct ServerController {
 
 impl ServerController {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
-        let bind: SocketAddr = "0.0.0.0:8080".parse().expect("valid default bind");
+        let bind: SocketAddr = "0.0.0.0:14444".parse().expect("valid default bind");
         let db = airpaste_agent::app_support_dir().join("server.redb");
         Self {
             runtime,

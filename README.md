@@ -40,7 +40,7 @@ Run it with:
 ```powershell
 .\scripts\setup-windows-toolchain.ps1 -Proxy "http://127.0.0.1:7897"
 $env:PATH = "D:\ep\air-paste\tools\winlibs\mingw64\bin;$env:PATH"
-cargo +stable-x86_64-pc-windows-gnu run -p airpaste-server -- --bind 0.0.0.0:8080 --db .\airpaste.redb
+cargo +stable-x86_64-pc-windows-gnu run -p airpaste-server -- --bind 0.0.0.0:14444 --db .\airpaste.redb
 ```
 
 The setup script installs Rust and downloads a portable WinLibs MinGW toolchain under `tools/winlibs` for linking on Windows. Omit `-Proxy` when direct network access works.
@@ -73,7 +73,7 @@ cargo +stable-x86_64-pc-windows-gnu build -p airpaste-server -p airpaste-agent
 Run the agent against a local server:
 
 ```powershell
-.\target\debug\airpaste-agent.exe --server-url http://127.0.0.1:8080 --state-path .\.airpaste-agent-a.json --device-name "PC A" --auth-token "<secret-if-server-enabled-it>"
+.\target\debug\airpaste-agent.exe --server-url http://127.0.0.1:14444 --state-path .\.airpaste-agent-a.json --device-name "PC A" --auth-token "<secret-if-server-enabled-it>"
 ```
 
 To join a non-first device, create a pairing code through `POST /v1/pair/start` from an already trusted device, then start the new agent with `--pair-code <code>`. The first registered device in a fresh database is trusted automatically for bootstrap.

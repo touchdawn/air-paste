@@ -15,7 +15,7 @@ pub enum ClipboardMode {
 
 /// Default control-plane server URL. Exposed so embedders (the tray) can tell whether the
 /// parsed `server_url` is still the default (and may be overridden by their own config).
-pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
+pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:14444";
 
 #[derive(Debug, Parser)]
 #[command(name = "airpaste-agent")]

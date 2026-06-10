@@ -6,7 +6,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(name = "airpaste-server")]
 #[command(about = "Air Paste control-plane server")]
 struct Args {
-    #[arg(long, env = "AIRPASTE_BIND", default_value = "0.0.0.0:8080")]
+    #[arg(long, env = "AIRPASTE_BIND", default_value = "0.0.0.0:14444")]
     bind: SocketAddr,
 
     #[arg(long, env = "AIRPASTE_DB", default_value = "airpaste.redb")]
