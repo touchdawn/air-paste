@@ -679,10 +679,21 @@ pub fn spawn_embedded(args: Args) -> AgentHandle {
         shared: shared.clone(),
     };
     tokio::spawn(async move {
-        if let Err(error) = run(args, shared.clone()).await {
-            tracing::error!(%error, "embedded agent stopped");
-            *shared.last_error.lock().unwrap() = Some(format!("{error:#}"));
-        }
+        let result = run(args, shared.clone()).await;
+        // `run` aborts every agent task before returning, so nothing can flip this back to
+        // true: from here on the UI truthfully shows the agent as stopped.
+        shared.connected.store(false, Ordering::Relaxed);
+        let message = match result {
+            Ok(()) => {
+                tracing::info!("embedded agent exited");
+                "agent exited".to_string()
+            }
+            Err(error) => {
+                tracing::error!(%error, "embedded agent stopped");
+                format!("{error:#}")
+            }
+        };
+        *shared.last_error.lock().unwrap() = Some(message);
     });
     handle
 }
@@ -856,7 +867,7 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         peer_public_url: peer_public_url.clone(),
         policy: file_policy.clone(),
     });
-    let peer_task = tokio::spawn(run_peer_server(args.peer_bind, peer_registry.clone()));
+    let mut peer_task = tokio::spawn(run_peer_server(args.peer_bind, peer_registry.clone()));
 
     let (_mdns_daemon, peer_directory) =
         match discovery::start(&device_id, &device_name, args.peer_bind.port()) {
@@ -883,7 +894,7 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         cache_dir: cache_dir.clone(),
     });
 
-    let poll_task = if args.publish_clipboard {
+    let mut poll_task = if args.publish_clipboard {
         tokio::spawn(poll_clipboard(
             client.clone(),
             clipboard.clone(),
@@ -902,16 +913,17 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         tokio::spawn(std::future::pending())
     };
 
-    // Keep a fresh snapshot of the server's device registry for the UI. Detached: failures (e.g.
-    // before this device is trusted) must not take down the agent. Clone client/device_id since
-    // `run_ws` below takes ownership of both.
-    tokio::spawn(refresh_devices_loop(
+    // Keep a fresh snapshot of the server's device registry for the UI. Not select!-ed on
+    // below: failures (e.g. before this device is trusted) must not take down the agent — but
+    // it is aborted with the rest once the agent stops. Clone client/device_id since `run_ws`
+    // below takes ownership of both.
+    let refresh_task = tokio::spawn(refresh_devices_loop(
         client.clone(),
         device_id.clone(),
         shared.clone(),
     ));
 
-    let ws_task = tokio::spawn(run_ws(
+    let mut ws_task = tokio::spawn(run_ws(
         client,
         clipboard,
         device_id,
@@ -935,20 +947,36 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         shared.clone(),
     ));
 
-    tokio::select! {
-        result = peer_task => result??,
-        result = poll_task => result??,
-        result = ws_task => result??,
+    let result = tokio::select! {
+        result = &mut peer_task => flatten_task(result),
+        result = &mut poll_task => flatten_task(result),
+        result = &mut ws_task => flatten_task(result),
         _ = shutdown_signal() => {
             tracing::info!("shutdown requested");
+            Ok(())
         }
-    }
+    };
 
-    Ok(())
+    // The core tasks live and die together: when one of them exits (e.g. the peer file server
+    // could not bind its port), the agent as a whole stops. Merely dropping the JoinHandles
+    // would detach the survivors, leaving a half-alive agent that keeps reconnecting and
+    // setting `connected` behind the UI's back.
+    peer_task.abort();
+    poll_task.abort();
+    ws_task.abort();
+    refresh_task.abort();
+
+    result
 }
 
-/// Periodically refresh the UI's device-registry snapshot while connected. Detached; errors (this
-/// device not trusted yet, server briefly down) are logged at debug and retried on the next tick.
+/// Unwrap a core task's join result, surfacing a panic or cancellation as an error.
+fn flatten_task(result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> anyhow::Result<()> {
+    result.map_err(anyhow::Error::from)?
+}
+
+/// Periodically refresh the UI's device-registry snapshot while connected. Errors (this device
+/// not trusted yet, server briefly down) are logged at debug and retried on the next tick; the
+/// loop only ends when `run` aborts it on agent shutdown.
 async fn refresh_devices_loop(
     client: ServerClient,
     self_device_id: DeviceId,
