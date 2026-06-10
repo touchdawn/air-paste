@@ -12,6 +12,39 @@ Run the tray app (`airpaste-tray`, menu bar on macOS / system tray on Windows) o
 - **Receive**: focus the target app and press **`Option+V`** / **`Alt+V`** — the latest text is pasted, or the latest pending files are downloaded and pasted.
 - No hotkeys needed if you prefer the window: type text and click **Send**, drag files into the window to send, click **Copy**/**Download** on inbox items to receive.
 
+This describes **isolated mode** — the tray app's default and our recommendation; see the next section.
+
+## Clipboard modes: isolated vs. system (we recommend isolated)
+
+The agent has two clipboard modes, controlled by the **"Isolated mode"** checkbox in the tray window or `--clipboard-mode=isolated|system` on the CLI. **The tray GUI defaults to isolated; the CLI agent defaults to system.**
+
+### Isolated mode (recommended)
+
+AirPaste is fully decoupled from the system clipboard; both sending and receiving are explicit:
+
+- **Sending is explicit**: copy normally (`Cmd+C` / `Ctrl+C`), then press `Option+C` / `Alt+C` — only then is the current clipboard end-to-end encrypted and published. Sending the same content twice is deduplicated, so double-pressing publishes once and stale clipboard content is never re-sent by accident.
+- **Receiving is explicit**: remote text lands only in the AirPaste **inbox** (viewable in the window, with a Copy button) and **never** overwrites your system clipboard on its own. Pressing `Option+V` / `Alt+V` pastes the latest text into the focused app — the system clipboard is borrowed for the paste and restored afterwards. If the latest arrival is a file, the hotkey downloads and pastes it instead.
+
+Why we recommend it:
+
+- **Nothing leaks**: not every copy leaves your machine — only what you explicitly send with `Option+C` / `Alt+C`. System mode relies on heuristic sensitive-content filtering as a safety net; isolated mode doesn't need it by design.
+- **Nothing is clobbered**: a copy on another device can never silently overwrite what you were about to paste locally.
+
+### System mode
+
+The classic auto-syncing clipboard:
+
+- every local text copy is published automatically (after sensitive-content filtering: private keys, JWTs, tokens, OTP-like and card-like numbers are skipped);
+- remote text is written straight into your system clipboard, ready for a plain `Cmd+V` / `Ctrl+V`.
+
+More convenient, at a cost: every copy is sent out by default (the filter is only heuristic), and remote content can overwrite your local clipboard without warning. Best suited for two devices that are both yours, on a trusted LAN.
+
+**Files** behave the same in both modes: an incoming file manifest is only recorded as pending until you press `Option+V` / `Alt+V` (or click **Download** in the inbox).
+
+To switch: toggle the "Isolated mode" checkbox in the tray window, or start the CLI with `--clipboard-mode=isolated` / `--clipboard-mode=system`.
+
+> macOS permission note: `Option+V` (simulating a paste into other apps) requires Accessibility permission; `Option+C` only reads the clipboard and needs no permission.
+
 ## Quick start (GUI only, no command line)
 
 You need two devices, A and B. A also acts as the server.
