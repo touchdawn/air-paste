@@ -12,8 +12,11 @@
 mod app;
 mod autostart;
 mod config;
+mod icon;
 mod platform;
 mod server;
+mod theme;
+mod ui;
 
 fn main() -> eframe::Result<()> {
     app::run()
