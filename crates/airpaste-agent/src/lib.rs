@@ -2033,6 +2033,7 @@ async fn run_ws(
                                 &hotkey_clipboard,
                                 &last_pushed,
                                 text_clip_ttl_secs,
+                                &hotkey_shared,
                             )
                             .await
                             .with_context(|| format!("{HOTKEY_MOD_NAME}+C failed")),
@@ -2436,35 +2437,80 @@ async fn paste_inbox_text(
 /// Alt+C: publish the current system clipboard to the AirPaste channel. The user copies normally
 /// (Ctrl/Cmd+C) first, then presses Alt+C, so we read whatever they just placed on the clipboard
 /// instead of synthesizing a copy ourselves. This has no focus dependency, needs no Accessibility
-/// permission, and never touches the user's clipboard. De-duplicates against the last push so a
-/// stale clipboard or an accidental double-press does not republish.
+/// permission, and never touches the user's clipboard. Text wins when both are present; with no
+/// text, a clipboard bitmap (e.g. a screenshot tool's output) is PNG-staged and published as a
+/// file clip, exactly like an image pasted into the tray's send tab. De-duplicates against the
+/// last push so a stale clipboard or an accidental double-press does not republish.
 async fn copy_selection_to_airpaste(
     client: &ServerClient,
     device_id: &DeviceId,
     clipboard: &Clipboard,
     last_pushed: &Mutex<Option<String>>,
     text_clip_ttl_secs: u64,
+    shared: &AgentShared,
 ) -> anyhow::Result<Toast> {
-    let Some(text) = clipboard.get_text().ok().flatten() else {
+    let text = clipboard
+        .get_text()
+        .ok()
+        .flatten()
+        .filter(|text| !text.trim().is_empty());
+    if let Some(text) = text {
+        // Skip when the clipboard is unchanged since our last push: avoids re-sending a stale
+        // clipboard the user didn't refresh, and collapses an accidental double Alt+C into one
+        // clip.
+        if last_pushed.lock().await.as_deref() == Some(text.as_str()) {
+            tracing::info!("{HOTKEY_MOD_NAME}+C: clipboard unchanged since last push, skipping");
+            return Ok(Toast::info("内容未变化,无需重发"));
+        }
+        let response =
+            publish_text_clip(client, device_id, text.clone(), text_clip_ttl_secs).await?;
+        *last_pushed.lock().await = Some(text);
+        tracing::info!(clip_id = %response.clip_id, "pushed clipboard to AirPaste");
+        return Ok(Toast::info("已发送到 AirPaste"));
+    }
+
+    let Some(image) = clipboard.get_image()? else {
         tracing::warn!(
-            "{HOTKEY_MOD_NAME}+C found no clipboard text (copy something with Ctrl/Cmd+C first; \
+            "{HOTKEY_MOD_NAME}+C found no clipboard text or image (copy something first; \
              over RDP the clipboard can lag several seconds)"
         );
-        return Ok(Toast::error("剪贴板没有文本,请先 Ctrl/Cmd+C 复制"));
+        return Ok(Toast::error("剪贴板没有文本或图片,请先复制"));
     };
-    if text.trim().is_empty() {
-        return Ok(Toast::error("剪贴板没有文本,请先 Ctrl/Cmd+C 复制"));
-    }
-    // Skip when the clipboard is unchanged since our last push: avoids re-sending a stale
-    // clipboard the user didn't refresh, and collapses an accidental double Alt+C into one clip.
-    if last_pushed.lock().await.as_deref() == Some(text.as_str()) {
-        tracing::info!("{HOTKEY_MOD_NAME}+C: clipboard unchanged since last push, skipping");
+    // De-dup an unchanged bitmap the same way as text, keyed on a content fingerprint.
+    let fingerprint = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (image.width, image.height).hash(&mut hasher);
+        image.rgba.hash(&mut hasher);
+        format!("image:{:016x}", hasher.finish())
+    };
+    if last_pushed.lock().await.as_deref() == Some(fingerprint.as_str()) {
+        tracing::info!("{HOTKEY_MOD_NAME}+C: clipboard image unchanged since last push, skipping");
         return Ok(Toast::info("内容未变化,无需重发"));
     }
-    let response = publish_text_clip(client, device_id, text.clone(), text_clip_ttl_secs).await?;
-    *last_pushed.lock().await = Some(text);
-    tracing::info!(clip_id = %response.clip_id, "pushed clipboard to AirPaste");
-    Ok(Toast::info("已发送到 AirPaste"))
+    let publish = shared
+        .file_publish
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("file publish context is not ready yet"))?;
+    let path = stage_pasted_image_png(&image.rgba, image.width as u32, image.height as u32)?;
+    publish_file_manifest(
+        client,
+        device_id,
+        &publish.registry,
+        &publish.peer_public_url,
+        &publish.policy,
+        vec![path],
+    )
+    .await?;
+    *last_pushed.lock().await = Some(fingerprint);
+    tracing::info!(
+        width = image.width,
+        height = image.height,
+        "pushed clipboard image to AirPaste"
+    );
+    Ok(Toast::info("已发送图片"))
 }
 
 #[allow(clippy::too_many_arguments)]

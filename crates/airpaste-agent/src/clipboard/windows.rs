@@ -179,11 +179,21 @@ impl Clipboard {
         Ok(())
     }
 
-    /// Image paste is not wired up on Windows yet — needs CF_DIB/CF_DIBV5 decoding (or routing
-    /// this module through arboard's `image-data` feature). `None` means "no image on the
-    /// clipboard", so the tray paste path silently does nothing here for now.
+    /// Read a bitmap from the clipboard (e.g. a screenshot tool's output). Goes through
+    /// arboard, which handles the CF_DIB/CF_DIBV5 decoding the raw Win32 path here doesn't.
     pub fn get_image(&self) -> anyhow::Result<Option<super::ClipboardImage>> {
-        Ok(None)
+        use anyhow::Context;
+        let mut clipboard =
+            arboard::Clipboard::new().context("failed to access Windows clipboard")?;
+        match clipboard.get_image() {
+            Ok(image) => Ok(Some(super::ClipboardImage {
+                width: image.width,
+                height: image.height,
+                rgba: image.bytes.into_owned(),
+            })),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(error) => Err(error).context("failed to read image from Windows clipboard"),
+        }
     }
 }
 

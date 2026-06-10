@@ -30,6 +30,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# Clipboard images only: text/files stay on the raw Win32 path below, but arboard does the
+# CF_DIB/CF_DIBV5 decoding that path lacks.
+arboard.workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_DataExchange",
