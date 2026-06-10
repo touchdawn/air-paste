@@ -237,7 +237,8 @@ fn derive_wrap_key(
     info.extend_from_slice(ephemeral_pub);
     info.extend_from_slice(recipient_pub);
     let mut okm = [0u8; KEY_LEN];
-    hkdf.expand(&info, &mut okm).map_err(|_| CryptoError::Hkdf)?;
+    hkdf.expand(&info, &mut okm)
+        .map_err(|_| CryptoError::Hkdf)?;
     Ok(okm)
 }
 
@@ -285,7 +286,8 @@ mod tests {
     #[test]
     fn persisted_identity_can_decrypt() {
         let bob = EncryptionIdentity::generate();
-        let restored = EncryptionIdentity::from_private_key_base64(&bob.private_key_base64()).unwrap();
+        let restored =
+            EncryptionIdentity::from_private_key_base64(&bob.private_key_base64()).unwrap();
         let sealed = seal_text("hello", &[recipient(&bob, "bob")]).unwrap();
         let opened = open_text(
             &sealed.body_ciphertext_base64,

@@ -67,7 +67,10 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
                         app.agent.clear_pair_code();
                     }
                 });
-                hint(ui, "10 分钟内有效 — 在新设备「设置」页的「配对码」中填入并连接。");
+                hint(
+                    ui,
+                    "10 分钟内有效 — 在新设备「设置」页的「配对码」中填入并连接。",
+                );
             }
             Err(error) => {
                 status_line(ui, theme::DANGER, &format!("生成失败:{}", preview(&error)));

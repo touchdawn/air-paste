@@ -31,9 +31,10 @@ pub fn apply(ctx: &egui::Context) {
             TextStyle::Button,
             FontId::new(14.0, FontFamily::Proportional),
         );
-        style
-            .text_styles
-            .insert(TextStyle::Small, FontId::new(12.0, FontFamily::Proportional));
+        style.text_styles.insert(
+            TextStyle::Small,
+            FontId::new(12.0, FontFamily::Proportional),
+        );
         style.text_styles.insert(
             TextStyle::Monospace,
             FontId::new(13.0, FontFamily::Monospace),

@@ -12,8 +12,14 @@ fn main() {
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     let hash = if dirty { format!("{hash}+") } else { hash };
-    let date = git(&["show", "-s", "--format=%cd", "--date=format:%Y-%m-%d", "HEAD"])
-        .unwrap_or_else(|| "unknown".to_string());
+    let date = git(&[
+        "show",
+        "-s",
+        "--format=%cd",
+        "--date=format:%Y-%m-%d",
+        "HEAD",
+    ])
+    .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=AIRPASTE_GIT_HASH={hash}");
     println!("cargo:rustc-env=AIRPASTE_GIT_DATE={date}");

@@ -20,8 +20,8 @@ pub async fn serve(
     auth_token: Option<String>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let store = Store::open(db)
-        .with_context(|| format!("failed to open database at {}", db.display()))?;
+    let store =
+        Store::open(db).with_context(|| format!("failed to open database at {}", db.display()))?;
     let auth_token = auth_token.filter(|token| !token.is_empty());
     let auth_enabled = auth_token.is_some();
     let state = Arc::new(AppState::new(store, auth_token));

@@ -9,6 +9,8 @@ mod peer;
 mod relay;
 mod state_file;
 
+pub use crate::config::{app_support_dir, Args, ClipboardMode, DEFAULT_SERVER_URL};
+pub use crate::state_file::{AgentState, StateFile};
 use crate::{
     client::ServerClient,
     clipboard::Clipboard,
@@ -18,8 +20,6 @@ use crate::{
     paste::PasteSimulator,
     peer::{run_peer_server, PeerFileRegistry},
 };
-pub use crate::config::{app_support_dir, Args, ClipboardMode, DEFAULT_SERVER_URL};
-pub use crate::state_file::{AgentState, StateFile};
 use airpaste_core::{
     BlobRef, ClipId, ClipKind, DeviceId, EncryptionInfo, FileClip, FileEntry, FileEntryKind,
     TextClip, TransferToken,
@@ -61,7 +61,11 @@ const PASTE_CONSUME: Duration = Duration::from_millis(150);
 
 /// Display name of the isolated-mode hotkey modifier (Alt on Windows, the same physical key is
 /// Option on macOS), used in user-facing strings. The chords are `<mod>+C` / `<mod>+V`.
-pub const HOTKEY_MOD_NAME: &str = if cfg!(target_os = "macos") { "Option" } else { "Alt" };
+pub const HOTKEY_MOD_NAME: &str = if cfg!(target_os = "macos") {
+    "Option"
+} else {
+    "Alt"
+};
 
 #[derive(Clone)]
 struct FileTransferPolicy {
@@ -101,8 +105,7 @@ pub struct TransferProgress {
     pub current: String,
 }
 
-static TRANSFER_PROGRESS: std::sync::Mutex<Option<TransferProgress>> =
-    std::sync::Mutex::new(None);
+static TRANSFER_PROGRESS: std::sync::Mutex<Option<TransferProgress>> = std::sync::Mutex::new(None);
 
 pub(crate) fn set_transfer_progress(progress: Option<TransferProgress>) {
     if let Ok(mut guard) = TRANSFER_PROGRESS.lock() {
@@ -381,7 +384,10 @@ impl AgentHandle {
 
     /// Live progress of the current file download, if one is running.
     pub fn transfer_progress(&self) -> Option<TransferProgress> {
-        TRANSFER_PROGRESS.lock().ok().and_then(|guard| guard.clone())
+        TRANSFER_PROGRESS
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Snapshot of devices known to the server (for the "connected devices" view), refreshed in
@@ -460,8 +466,7 @@ impl AgentHandle {
         }
         let client_snapshot = self.shared.client.lock().unwrap().clone();
         let publish_snapshot = self.shared.file_publish.lock().unwrap().clone();
-        let (Some((client, device_id)), Some(publish)) = (client_snapshot, publish_snapshot)
-        else {
+        let (Some((client, device_id)), Some(publish)) = (client_snapshot, publish_snapshot) else {
             *self.shared.send_files.lock().unwrap() =
                 Some(SendStatus::Failed("尚未连接".to_string()));
             return;
@@ -500,8 +505,7 @@ impl AgentHandle {
         let apply_snapshot = self.shared.file_apply.lock().unwrap().clone();
         let shared = self.shared.clone();
         self.shared.runtime.spawn(async move {
-            let (Some((client, device_id)), Some(ctx)) = (client_snapshot, apply_snapshot)
-            else {
+            let (Some((client, device_id)), Some(ctx)) = (client_snapshot, apply_snapshot) else {
                 set_inbox_file_state(
                     &shared.inbox,
                     id,
@@ -549,15 +553,18 @@ impl AgentHandle {
             let Some(ctx) = apply_snapshot else {
                 return;
             };
-            let paths = shared.inbox.lock().await.iter().find_map(|item| {
-                match &item.kind {
+            let paths = shared
+                .inbox
+                .lock()
+                .await
+                .iter()
+                .find_map(|item| match &item.kind {
                     InboxItemKind::Files {
                         state: FileDownloadState::Done(paths),
                         ..
                     } if item.id == id => Some(paths.clone()),
                     _ => None,
-                }
-            });
+                });
             let Some(paths) = paths else {
                 return;
             };
@@ -996,7 +1003,8 @@ async fn refresh_devices_loop(
                     .map(|device| {
                         let last_seen_secs = device.last_seen_at.map(|ts| (now - ts).num_seconds());
                         DeviceInfo {
-                            online: last_seen_secs.map_or(false, |secs| secs < PRESENCE_WINDOW_SECS),
+                            online: last_seen_secs
+                                .map_or(false, |secs| secs < PRESENCE_WINDOW_SECS),
                             is_self: device.device_id == self_device_id,
                             device_id: device.device_id.0,
                             name: device.name,
@@ -1682,7 +1690,9 @@ mod tests {
         let rels: Vec<&str> = collected.iter().map(|(rel, _)| rel.as_str()).collect();
         assert_eq!(rels, vec!["dir/one.txt", "dir/sub/two.txt", "top.txt"]);
         // The folder name is preserved as the top-level prefix.
-        assert!(collected.iter().all(|(rel, path)| path.is_file() && !rel.contains("..")));
+        assert!(collected
+            .iter()
+            .all(|(rel, path)| path.is_file() && !rel.contains("..")));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1905,26 +1915,24 @@ async fn run_ws(
                             )
                             .await
                             .with_context(|| format!("{HOTKEY_MOD_NAME}+C failed")),
-                            HotkeyAction::PasteRemote => {
-                                paste_remote_via_hotkey(
-                                    &hotkey_clip_ctx,
-                                    &hotkey_clipboard,
-                                    &hotkey_paste,
-                                    &hotkey_client,
-                                    &hotkey_device_id,
-                                    &hotkey_last_local_file_write,
-                                    &hotkey_pending_file_clip,
-                                    &hotkey_identity,
-                                    &hotkey_encryption,
-                                    &hotkey_file_policy,
-                                    &hotkey_peer_directory,
-                                    prefer_relay,
-                                    paste_after_hotkey,
-                                    &hotkey_cache_dir,
-                                )
-                                .await
-                                .with_context(|| format!("{HOTKEY_MOD_NAME}+V failed"))
-                            }
+                            HotkeyAction::PasteRemote => paste_remote_via_hotkey(
+                                &hotkey_clip_ctx,
+                                &hotkey_clipboard,
+                                &hotkey_paste,
+                                &hotkey_client,
+                                &hotkey_device_id,
+                                &hotkey_last_local_file_write,
+                                &hotkey_pending_file_clip,
+                                &hotkey_identity,
+                                &hotkey_encryption,
+                                &hotkey_file_policy,
+                                &hotkey_peer_directory,
+                                prefer_relay,
+                                paste_after_hotkey,
+                                &hotkey_cache_dir,
+                            )
+                            .await
+                            .with_context(|| format!("{HOTKEY_MOD_NAME}+V failed")),
                         };
                         if let Err(error) = result {
                             tracing::warn!(%error, "hotkey action failed");
@@ -2001,9 +2009,12 @@ async fn run_ws_once(
     connected: &AtomicBool,
 ) -> anyhow::Result<()> {
     let request = client.ws_request().await?;
-    let (ws, _) = tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
-        .await
-        .map_err(|_| anyhow::anyhow!("websocket connect timed out"))??;
+    let (ws, _) = tokio::time::timeout(
+        WS_CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("websocket connect timed out"))??;
     let (mut writer, mut reader) = ws.split();
     writer
         .send(Message::Text(serde_json::to_string(
@@ -2560,10 +2571,7 @@ async fn download_via_relay_for(
 }
 
 /// File indexes in a manifest that are regular files and not yet present in `downloaded`.
-fn missing_file_indexes(
-    file_clip: &FileClip,
-    downloaded: &BTreeMap<usize, PathBuf>,
-) -> Vec<usize> {
+fn missing_file_indexes(file_clip: &FileClip, downloaded: &BTreeMap<usize, PathBuf>) -> Vec<usize> {
     file_clip
         .files
         .iter()
@@ -2640,7 +2648,8 @@ async fn download_remote_files(
                 identity,
             )
             .await?;
-        let destination = safe_cache_path(&clip_cache_dir, &entry.relative_path, &entry.display_name);
+        let destination =
+            safe_cache_path(&clip_cache_dir, &entry.relative_path, &entry.display_name);
         download_peer_file_to_cache(response, entry, &destination).await?;
         downloaded.insert(index, destination.clone());
         tracing::info!(path = %destination.display(), progress = format!("{}/{}", downloaded.len(), total), "downloaded remote file");
@@ -2744,7 +2753,11 @@ async fn download_peer_file_to_cache(
 /// `cache_dir`**: each path component is sanitized and `.`/`..`/empty/root components are
 /// dropped, so traversal is impossible by construction. Falls back to a flattened `display_name`
 /// if `relative_path` yields no usable component.
-pub(crate) fn safe_cache_path(cache_dir: &Path, relative_path: &str, display_name: &str) -> PathBuf {
+pub(crate) fn safe_cache_path(
+    cache_dir: &Path,
+    relative_path: &str,
+    display_name: &str,
+) -> PathBuf {
     let mut path = cache_dir.to_path_buf();
     let mut pushed = false;
     for component in relative_path.split(['/', '\\']) {

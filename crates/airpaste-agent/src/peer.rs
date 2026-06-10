@@ -302,8 +302,9 @@ async fn bind_with_retry(addr: SocketAddr) -> anyhow::Result<TcpListener> {
                 tokio::time::sleep(INTERVAL).await;
             }
             Err(error) => {
-                return Err(anyhow::Error::new(error)
-                    .context(format!("failed to bind peer port {addr} after {attempt} attempt(s)")));
+                return Err(anyhow::Error::new(error).context(format!(
+                    "failed to bind peer port {addr} after {attempt} attempt(s)"
+                )));
             }
         }
     }
@@ -427,10 +428,7 @@ mod tests {
             std::fs::write(&path, b"hello relay fallback").expect("write temp file");
 
             let mut keys = HashMap::new();
-            keys.insert(
-                requester_device_id.clone(),
-                requester.public_key_base64(),
-            );
+            keys.insert(requester_device_id.clone(), requester.public_key_base64());
 
             registry
                 .register(

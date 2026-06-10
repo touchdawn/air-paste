@@ -21,9 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path, path::PathBuf, time::Duration};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    tungstenite::Message, MaybeTlsStream, WebSocketStream,
-};
+use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 const RELAY_CHUNK_BYTES: usize = 256 * 1024;
 const RELAY_RECV_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,9 +33,12 @@ const RELAY_SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 async fn connect_relay(
     request: tokio_tungstenite::tungstenite::handshake::client::Request,
 ) -> anyhow::Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
-    let (ws, _) = tokio::time::timeout(RELAY_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
-        .await
-        .map_err(|_| anyhow::anyhow!("relay websocket connect timed out"))??;
+    let (ws, _) = tokio::time::timeout(
+        RELAY_CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("relay websocket connect timed out"))??;
     Ok(ws)
 }
 
@@ -140,9 +141,9 @@ pub async fn serve_relay_session(
                         writer.send(Message::Binary(chunk.to_vec())).await?;
                     }
                     writer
-                        .send(Message::Text(serde_json::to_string(&RelayControl::FileEnd {
-                            index,
-                        })?))
+                        .send(Message::Text(serde_json::to_string(
+                            &RelayControl::FileEnd { index },
+                        )?))
                         .await?;
                     Ok(())
                 }
@@ -163,9 +164,9 @@ pub async fn serve_relay_session(
             Err(reason) => {
                 tracing::warn!(%session_id, index, %reason, "relay file request rejected");
                 writer
-                    .send(Message::Text(serde_json::to_string(&RelayControl::Error {
-                        message: reason,
-                    })?))
+                    .send(Message::Text(serde_json::to_string(
+                        &RelayControl::Error { message: reason },
+                    )?))
                     .await?;
             }
         }
@@ -331,7 +332,10 @@ pub async fn download_via_relay(
         if let Some(expected) = &entry.sha256 {
             let actual = crate::hex_lower(&Sha256::digest(&plaintext));
             if &actual != expected {
-                bail!("relayed file {} failed sha256 verification", entry.relative_path);
+                bail!(
+                    "relayed file {} failed sha256 verification",
+                    entry.relative_path
+                );
             }
         }
 

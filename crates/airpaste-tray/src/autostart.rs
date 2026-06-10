@@ -98,7 +98,9 @@ mod imp {
             // Quote the path so a path with spaces is parsed as one argument at login.
             let quoted = format!("\"{}\"", exe.display());
             let status = Command::new("reg")
-                .args(["add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &quoted, "/f"])
+                .args([
+                    "add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &quoted, "/f",
+                ])
                 .creation_flags(CREATE_NO_WINDOW)
                 .status()?;
             if !status.success() {

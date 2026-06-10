@@ -64,8 +64,7 @@ impl TrayConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let body = serde_json::to_string_pretty(self)
-            .unwrap_or_else(|_| "{}".to_string());
+        let body = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string());
         std::fs::write(&path, body)
     }
 }

@@ -52,8 +52,15 @@ pub fn start(
     properties.insert(TXT_DEVICE_NAME.to_string(), device_name.to_string());
 
     // Empty address + enable_addr_auto lets mdns-sd announce all reachable interface IPs.
-    let service = ServiceInfo::new(SERVICE_TYPE, &instance, &host_name, "", peer_port, properties)?
-        .enable_addr_auto();
+    let service = ServiceInfo::new(
+        SERVICE_TYPE,
+        &instance,
+        &host_name,
+        "",
+        peer_port,
+        properties,
+    )?
+    .enable_addr_auto();
     daemon.register(service)?;
 
     let directory = PeerDirectory::default();

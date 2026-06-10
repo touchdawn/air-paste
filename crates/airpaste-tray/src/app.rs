@@ -65,7 +65,10 @@ pub fn run() -> eframe::Result<()> {
     thread::Builder::new()
         .name("airpaste-agent-rt".to_string())
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(error) => {
                     eprintln!("failed to start agent runtime: {error}");
@@ -187,7 +190,8 @@ impl TrayApp {
         let quit = MenuItem::new("退出 AirPaste", true, None);
         let menu = Menu::new();
         menu.append(&show).expect("append show");
-        menu.append(&PredefinedMenuItem::separator()).expect("append sep");
+        menu.append(&PredefinedMenuItem::separator())
+            .expect("append sep");
         menu.append(&quit).expect("append quit");
 
         let tray = TrayIconBuilder::new()
@@ -227,10 +231,10 @@ impl TrayApp {
         let mut config = TrayConfig::load();
         let server_changed = config.last_server_url.as_deref() != Some(server_url.as_str());
         config.server_url = Some(server_url.clone());
-        config.auth_token = Some(self.auth_token_input.trim().to_string())
-            .filter(|t: &String| !t.is_empty());
-        config.pair_code = Some(self.pair_code_input.trim().to_string())
-            .filter(|c: &String| !c.is_empty());
+        config.auth_token =
+            Some(self.auth_token_input.trim().to_string()).filter(|t: &String| !t.is_empty());
+        config.pair_code =
+            Some(self.pair_code_input.trim().to_string()).filter(|c: &String| !c.is_empty());
         config.last_server_url = Some(server_url);
         if let Err(error) = config.save() {
             eprintln!("airpaste-tray: failed to save config: {error}");
@@ -333,12 +337,14 @@ impl eframe::App for TrayApp {
 
         // Persistent chrome: header + tab strip on top, build identity pinned at the bottom.
         egui::TopBottomPanel::top("header")
-            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
-                left: 14.0,
-                right: 14.0,
-                top: 12.0,
-                bottom: 8.0,
-            }))
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                    left: 14.0,
+                    right: 14.0,
+                    top: 12.0,
+                    bottom: 8.0,
+                }),
+            )
             .show(ctx, |ui| {
                 ui::header::show(self, ui);
                 ui.add_space(6.0);
@@ -367,11 +373,13 @@ impl eframe::App for TrayApp {
 
         let frame = egui::Frame::central_panel(&ctx.style())
             .inner_margin(egui::Margin::symmetric(14.0, 12.0));
-        egui::CentralPanel::default().frame(frame).show(ctx, |ui| match self.tab {
-            Tab::Send => ui::tab_send::show(self, ui),
-            Tab::Inbox => ui::tab_inbox::show(self, ui),
-            Tab::Devices => ui::tab_devices::show(self, ui),
-            Tab::Settings => ui::tab_settings::show(self, ui),
-        });
+        egui::CentralPanel::default()
+            .frame(frame)
+            .show(ctx, |ui| match self.tab {
+                Tab::Send => ui::tab_send::show(self, ui),
+                Tab::Inbox => ui::tab_inbox::show(self, ui),
+                Tab::Devices => ui::tab_devices::show(self, ui),
+                Tab::Settings => ui::tab_settings::show(self, ui),
+            });
     }
 }

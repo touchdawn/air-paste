@@ -63,7 +63,11 @@ async fn register_device(
 ) -> ApiResult<Json<RegisterDeviceResponse>> {
     let device = state
         .store
-        .register_device(request.name, request.public_key, request.encryption_public_key)
+        .register_device(
+            request.name,
+            request.public_key,
+            request.encryption_public_key,
+        )
         .map_err(ApiError::from)?;
     Ok(Json(RegisterDeviceResponse { device }))
 }

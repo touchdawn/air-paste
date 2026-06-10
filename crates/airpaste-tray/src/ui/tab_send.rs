@@ -85,10 +85,8 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
 
 /// The dashed drop target. Purely visual — drops anywhere on the window are accepted.
 fn drop_zone(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 76.0),
-        egui::Sense::hover(),
-    );
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 76.0), egui::Sense::hover());
     let fill = ui.visuals().faint_bg_color;
     let stroke = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
     let text_color = ui.visuals().weak_text_color();
