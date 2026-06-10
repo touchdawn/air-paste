@@ -178,6 +178,13 @@ impl Clipboard {
         }
         Ok(())
     }
+
+    /// Image paste is not wired up on Windows yet — needs CF_DIB/CF_DIBV5 decoding (or routing
+    /// this module through arboard's `image-data` feature). `None` means "no image on the
+    /// clipboard", so the tray paste path silently does nothing here for now.
+    pub fn get_image(&self) -> anyhow::Result<Option<super::ClipboardImage>> {
+        Ok(None)
+    }
 }
 
 struct ClipboardGuard;

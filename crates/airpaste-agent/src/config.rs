@@ -241,7 +241,7 @@ fn default_state_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".airpaste-agent.json"))
 }
 
-fn default_cache_dir() -> PathBuf {
+pub(crate) fn default_cache_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = home_dir() {

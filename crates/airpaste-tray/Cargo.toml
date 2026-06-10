@@ -23,3 +23,12 @@ serde_json.workspace = true
 # as eframe's winit (0.30) so the event-loop-builder hook types unify.
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"
+# Cmd+V never reaches egui (egui-winit swallows the chord and only emits a Paste event when the
+# clipboard has text), so a local NSEvent monitor flags it for the send tab's image/file paste.
+# Versions match what arboard already pulls in, so these add no new builds.
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSEvent",
+] }

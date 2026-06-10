@@ -812,6 +812,27 @@ compare); a way to remove orphaned devices (there is no `DELETE /v1/devices` —
 "Windows Agent" entries from the old CWD-state bug remain in the device list forever);
 re-verify the new tab UI on the Windows build (shared code, but fonts/DPI differ).
 
+**2026-06-10: the send tab now accepts Cmd+V image and file pastes (macOS).** egui cannot see
+the paste chord itself — egui-winit swallows the V key event and only synthesizes
+`Event::Paste` when the clipboard holds *text* — so `platform.rs` installs a local `NSEvent`
+monitor (objc2-app-kit, same versions arboard already pulls in) that flags the chord for
+`TrayApp::update`. On the send tab the flag routes: clipboard files → `send_files` (the
+synthesized text paste with Finder's filename alternates is dropped); text → TextEdit's normal
+paste; bare image (e.g. a screenshot) → staged with a thumbnail + explicit 「发送图片」
+confirm. Sending PNG-encodes off-thread via `airpaste_agent::stage_pasted_image_png`
+(`outbox.rs`, new) into `<cache>/outbox/` and ships it through the existing file pipeline —
+the staged file must outlive the publish because recipients pull it later, so the outbox is
+pruned by age (>24h) on the next staging instead. Clipboard layer: arboard's `image-data`
+feature is now on and `clipboard/macos.rs` gained `get_image` (an `#[ignore]`d real-pasteboard
+test exists: `cargo test -p airpaste-agent --lib -- --ignored pasteboard`). Deliberately NOT
+implemented as the protocol's unused `ClipKind::Image` — the file pipeline already does
+checksums/relay/progress; a true image clip (bitmap lands on the recipient's clipboard via
+`set_image`) plus the blob channel for >2MB inline bodies remains the follow-up. **Windows
+TODO (for the Windows-side agent):** `clipboard/windows.rs::get_image` is a stub returning
+`None` (needs CF_DIB/CF_DIBV5, or route the module through arboard) and
+`platform.rs::install_paste_monitor` is a no-op (needs a Ctrl+V hook); the rest is shared.
+Still to verify on real hardware: a cross-machine pasted-screenshot send.
+
 ### 3d. Windows UI — DONE (2026-06-08), minor click-test follow-up
 
 The same tray UI now runs on Windows. Confirmed first that the eframe + tray-icon stack

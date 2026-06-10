@@ -16,7 +16,7 @@ repository = "https://example.invalid/air-paste"
 
 [workspace.dependencies]
 anyhow = "1"
-arboard = { version = "3.6.1", default-features = false }
+arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 axum = { version = "0.7", features = ["ws"] }
 eframe = "0.29"
 tray-icon = "0.19"

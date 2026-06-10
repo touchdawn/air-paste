@@ -145,6 +145,19 @@ pub(crate) struct TrayApp {
     // in-flight send reports Sent (kept on failure so the user can retry).
     pub(crate) send_input: String,
     pub(crate) send_clear_pending: bool,
+    // Image pasted into the send tab (Cmd+V), staged for preview until the user confirms.
+    pub(crate) pasted_image: Option<PendingImage>,
+    // Failure from the paste capture or the off-thread PNG staging; shown on the send tab.
+    pub(crate) pasted_image_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// A clipboard bitmap staged on the send tab: the raw pixels for the eventual PNG encode plus
+/// the texture that previews it.
+pub(crate) struct PendingImage {
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) texture: egui::TextureHandle,
 }
 
 /// Install a CJK-capable font as the primary UI font so Chinese text renders (egui's default
@@ -185,6 +198,7 @@ impl TrayApp {
     ) -> Self {
         install_cjk_font(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
+        platform::install_paste_monitor();
 
         let show = MenuItem::new("显示 AirPaste", true, None);
         let quit = MenuItem::new("退出 AirPaste", true, None);
@@ -217,6 +231,54 @@ impl TrayApp {
             server,
             send_input: String::new(),
             send_clear_pending: false,
+            pasted_image: None,
+            pasted_image_error: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// A paste chord landed while the send tab is up: route file and image pastes, which the
+    /// TextEdit cannot take, to the agent. Plain text falls through to the TextEdit's own
+    /// paste handling.
+    fn handle_send_tab_paste(&mut self, ctx: &egui::Context) {
+        let clipboard = airpaste_agent::clipboard::Clipboard::new();
+
+        // Files first: Finder writes the file names as a text alternate alongside the URLs,
+        // so "has text" would otherwise shadow a copied file. Sending matches the drop zone;
+        // the synthesized text paste is dropped so the names don't land in the draft.
+        if let Ok(Some(paths)) = clipboard.get_files() {
+            if !paths.is_empty() {
+                ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
+                self.agent.send_files(paths);
+                return;
+            }
+        }
+
+        if matches!(clipboard.get_text(), Ok(Some(text)) if !text.is_empty()) {
+            return;
+        }
+
+        match clipboard.get_image() {
+            Ok(Some(image)) => {
+                *self.pasted_image_error.lock().unwrap() = None;
+                let texture = ctx.load_texture(
+                    "pasted-image",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [image.width, image.height],
+                        &image.rgba,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                );
+                self.pasted_image = Some(PendingImage {
+                    rgba: image.rgba,
+                    width: image.width,
+                    height: image.height,
+                    texture,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                *self.pasted_image_error.lock().unwrap() = Some(format!("{error:#}"));
+            }
         }
     }
 
@@ -291,6 +353,12 @@ impl eframe::App for TrayApp {
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        // Native paste chord (Cmd+V): drained every frame so a paste on another tab cannot
+        // fire later, but only the send tab accepts rich (file/image) pastes.
+        if platform::take_paste_request() && self.tab == Tab::Send {
+            self.handle_send_tab_paste(ctx);
         }
 
         // OS drag-and-drop: files dropped anywhere on the window are published as a file

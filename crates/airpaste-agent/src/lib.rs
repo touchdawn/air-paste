@@ -1,15 +1,17 @@
 mod client;
-mod clipboard;
+pub mod clipboard;
 mod config;
 mod discovery;
 mod hotkey;
 mod identity;
+mod outbox;
 mod paste;
 mod peer;
 mod relay;
 mod state_file;
 
 pub use crate::config::{app_support_dir, Args, ClipboardMode, DEFAULT_SERVER_URL};
+pub use crate::outbox::stage_pasted_image_png;
 pub use crate::state_file::{AgentState, StateFile};
 use crate::{
     client::ServerClient,

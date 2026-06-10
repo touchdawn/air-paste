@@ -10,6 +10,13 @@ pub use windows::Clipboard;
 #[cfg(target_os = "macos")]
 pub use macos::Clipboard;
 
+/// An RGBA bitmap read from the system clipboard (row-major, 4 bytes per pixel).
+pub struct ClipboardImage {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+}
+
 #[cfg(not(any(windows, target_os = "macos")))]
 pub struct Clipboard;
 
@@ -33,5 +40,9 @@ impl Clipboard {
 
     pub fn set_files(&self, _paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
         anyhow::bail!("file clipboard MVP is currently implemented only on Windows")
+    }
+
+    pub fn get_image(&self) -> anyhow::Result<Option<ClipboardImage>> {
+        anyhow::bail!("image clipboard is currently implemented only on macOS")
     }
 }

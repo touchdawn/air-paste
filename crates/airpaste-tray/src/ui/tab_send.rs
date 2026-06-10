@@ -17,6 +17,8 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
             .hint_text("输入或粘贴要发送的文字…"),
     );
 
+    pasted_image_panel(app, ui);
+
     drop_zone(ui);
 
     ui.horizontal(|ui| {
@@ -62,6 +64,14 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
         None => {}
     }
 
+    if let Some(error) = app.pasted_image_error.lock().unwrap().clone() {
+        status_line(
+            ui,
+            theme::DANGER,
+            &format!("✗ 图片发送失败:{}", crate::ui::preview(&error)),
+        );
+    }
+
     match app.agent.send_files_status() {
         Some(SendStatus::Sending) => {
             hint(ui, "文件处理中…(大文件需要先计算校验和)");
@@ -83,6 +93,60 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
     }
 }
 
+/// The staged clipboard image (Cmd+V on this tab): a thumbnail, its dimensions, and an
+/// explicit send — pastes are easy to trigger by accident, so nothing ships until confirmed.
+fn pasted_image_panel(app: &mut TrayApp, ui: &mut egui::Ui) {
+    let mut send_clicked = false;
+    let mut cancel_clicked = false;
+
+    if let Some(pending) = &app.pasted_image {
+        ui.add_space(6.0);
+        ui.add(
+            egui::Image::new(&pending.texture)
+                .max_size(egui::vec2(ui.available_width(), 140.0))
+                .rounding(egui::Rounding::same(6.0)),
+        );
+        ui.horizontal(|ui| {
+            hint(
+                ui,
+                &format!("剪贴板图片 · {}×{}", pending.width, pending.height),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                send_clicked = primary_button(ui, app.agent.connected(), "发送图片").clicked();
+                cancel_clicked = ui.small_button("取消").clicked();
+            });
+        });
+        ui.add_space(2.0);
+    }
+
+    if cancel_clicked {
+        app.pasted_image = None;
+    }
+    if send_clicked {
+        send_pasted_image(app);
+    }
+}
+
+/// PNG-encode the staged bitmap and hand it to the file pipeline. Encoding a retina-sized
+/// screenshot is slow enough to stutter the UI, so it runs off-thread; progress then surfaces
+/// through the regular `send_files_status`, and an encode failure lands in
+/// `pasted_image_error`.
+fn send_pasted_image(app: &mut TrayApp) {
+    let Some(pending) = app.pasted_image.take() else {
+        return;
+    };
+    *app.pasted_image_error.lock().unwrap() = None;
+    let agent = app.agent.clone();
+    let errors = app.pasted_image_error.clone();
+    let (width, height) = (pending.width as u32, pending.height as u32);
+    std::thread::spawn(move || {
+        match airpaste_agent::stage_pasted_image_png(&pending.rgba, width, height) {
+            Ok(path) => agent.send_files(vec![path]),
+            Err(error) => *errors.lock().unwrap() = Some(format!("{error:#}")),
+        }
+    });
+}
+
 /// The dashed drop target. Purely visual — drops anywhere on the window are accepted.
 fn drop_zone(ui: &mut egui::Ui) {
     let (rect, _) =
@@ -101,10 +165,15 @@ fn drop_zone(ui: &mut egui::Ui) {
     ] {
         painter.extend(egui::Shape::dashed_line(&[a, b], stroke, 5.0, 4.0));
     }
+    // The paste affordance only exists where the native chord monitor is implemented.
+    #[cfg(target_os = "macos")]
+    const DROP_HINT: &str = "拖入文件/文件夹发送 · ⌘V 粘贴图片或文件";
+    #[cfg(not(target_os = "macos"))]
+    const DROP_HINT: &str = "把文件或文件夹拖到这里发送";
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        "把文件或文件夹拖到这里发送",
+        DROP_HINT,
         egui::FontId::proportional(13.0),
         text_color,
     );
