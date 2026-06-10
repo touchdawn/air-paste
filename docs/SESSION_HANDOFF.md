@@ -1,6 +1,6 @@
 # Air Paste Handoff
 
-Last updated: 2026-06-08
+Last updated: 2026-06-10
 
 This document is for the next coding session. It summarizes the current repo state, what is already working, what is intentionally still MVP-grade, and the recommended next steps.
 
@@ -81,13 +81,60 @@ macOS menu-bar UI:
     tray right-click menu (显示/退出) was not reliably click-tested (test-harness click-targeting
     issue, not a code one — the menu code is shared with the verified macOS path). See "Menu-bar UI".
 
-Recent commits (newest first): `83fd0f2` Windows tray: hide console in release,
-`3703107` cross-platform tray (macOS + Windows); `fe3eaf2` tray UI docs, `e766fd3` runtime isolated toggle,
-`33cdc5d` menu-bar-only, `abdc979` CJK/Chinese UI, `a833880` tray↔agent wiring, `46788ce`
-agent→library refactor, `d85bfc0` tray scaffold; `0d3fd31` Windows/RDP validation notes,
-`5944f53` Windows hotkey harness, `a382b28` pin RUST_LOG, `6e16882` log to stderr, `7d7bf5f`
-Windows isolated smoke, `0bf080d` fix Windows smoke for E2EE; `593bb03` relay/fallback
-hardening + isolated clipboard mode; `4f1feb6` prior handoff.
+### What changed in the 2026-06-09/10 session
+
+12. **Hotkeys rebound to `Alt+C` / `Alt+V`** (the same physical keys are `Option+C` /
+    `Option+V` on macOS) and **6-digit numeric pairing codes** — commit `a662481`. macOS uses
+    Carbon `RegisterEventHotKey` with the bare `optionKey` mask; Windows uses
+    `MOD_ALT | MOD_NOREPEAT`. User-facing strings derive the modifier name from
+    `airpaste_agent::HOTKEY_MOD_NAME` ("Option" on macOS, "Alt" elsewhere). Pairing codes are
+    now generated as 6 digits (`PairingCode::new`, ULID low bits mod 10^6) so they can be read
+    aloud and typed into the tray UI. `docs/USER_MANUAL.md` was updated to match
+    (`f1db13a`, `bd7f597`); **the smoke scripts were NOT** — see "Known stale" below.
+13. **Isolated `Alt+C` re-semanticized: it publishes the *current system clipboard*** —
+    commits `5d9bc82` + `a351b50`. The previous design (synthesize Cmd/Ctrl+C, poll-read the
+    selection, restore the old clipboard) was removed: it needed Accessibility for the copy
+    direction, depended on focus, and raced `rdpclip` over RDP. Now the user copies normally
+    first, then presses `Alt+C`; `copy_selection_to_airpaste` simply reads the clipboard and
+    publishes it, de-duplicating against the last pushed text (a stale clipboard or an
+    accidental double-press is skipped). `HOTKEY_MODIFIER_RELEASE` and the `COPY_POLL_*`
+    constants are gone. Modifier-leak protection moved into the paste synthesis itself: macOS
+    sets the Command flag explicitly on each `CGEvent` (a held Option cannot mix in); Windows
+    prepends Alt/Ctrl key-up events to the `SendInput` sequence.
+14. **Tray polish round** — commits `99bc776`, `5a9ddfd`, `f86f6a0`:
+    - **Build identity in the UI**: `crates/airpaste-tray/build.rs` embeds the git short hash
+      and commit date (`AIRPASTE_GIT_HASH/DATE`); a `+` suffix marks a dirty tree (tracked
+      files only, so untracked scratch files don't flip it). Shown in a pinned window footer
+      and the startup log, answering "which build is this machine running?".
+    - **Peer-port bind retry**: `peer::bind_with_retry` retries an `AddrInUse` bind
+      (20 × 250ms). Needed because the settings panel's「保存并连接」re-execs the process and
+      the old process may not have released `:17390` yet (Windows `os error 10048`).
+    - **Windows keeps its taskbar button**: the `with_taskbar(false)` tray-only policy from
+      the initial Windows port was reverted — a window with no taskbar/Alt-Tab entry was too
+      easy to lose. macOS stays an Accessory (menu-bar-only) app.
+    - **Connected-devices view**: the agent runs a detached `refresh_devices_loop` polling
+      `GET /v1/devices` every 5s while connected (failures are non-fatal, e.g. before the
+      device is trusted). `Device` gained a `last_seen_at` field, refreshed by the server on
+      WebSocket connect and every 30s heartbeat tick; a device counts as online if last seen
+      within 90s (`PRESENCE_WINDOW_SECS`). The tray renders 设备(N/M 在线) with per-device
+      online dots, 本机/未信任 markers, and a human last-seen. Mainly useful when this host
+      runs the embedded server.
+
+Known stale after the hotkey change: `scripts/smoke-hotkey-macos.sh` waits for the log line
+`registered remote paste hotkey Ctrl+Shift+V`, but the agent now logs `Option+V` — that
+interactive smoke will hang at the log wait until updated. `smoke-isolated-hotkey.ps1`,
+`smoke-isolated.ps1`, and `smoke-isolated-macos.sh` also still tell the operator to press the
+old `Ctrl+Shift` chords in their prompts/comments (the headless assertions are unaffected).
+
+Recent commits (newest first): `f86f6a0` tray devices view; `5a9ddfd` + `99bc776` build id in
+the footer, peer-port bind-retry, keep the Windows taskbar button; `a351b50` Alt+C publishes
+the current clipboard; `a662481` Alt+C/Alt+V rebind + 6-digit pair codes; `5d9bc82` Alt+C
+de-dup vs stale clipboard; `13cb52a` embedded server from the window; `3dd689d` pair code
+from the window; `a31383b` transfer progress; `a602b7c` isolated mode covers files;
+`fe1e4cf` recursive directory copy; `948ec6a`/`0dda82b`/`06bf51d` tray icon, inbox history,
+config/autostart/packaging; `83fd0f2` Windows tray: hide console in release; `3703107`
+cross-platform tray (macOS + Windows); `593bb03` relay/fallback hardening + isolated
+clipboard mode. Older history: `git log`.
 
 The workspace currently contains:
 
@@ -96,7 +143,7 @@ The workspace currently contains:
 - `crates/airpaste-crypto`: end-to-end content encryption (X25519 key agreement + XChaCha20-Poly1305 AEAD, per-clip content key wrapped per recipient).
 - `crates/airpaste-server`: Axum control-plane server using `redb`.
 - `crates/airpaste-agent`: lib + thin bin. The agent MVP (E2EE text sync, file manifest, peer file server, file download, remote paste hotkeys, Ed25519/X25519 identities) lives in the `airpaste_agent` library; `run_cli()` is the CLI entry and `spawn_embedded(args) -> AgentHandle` lets the tray run it in-process.
-- `crates/airpaste-tray`: cross-platform menu-bar / tray UI (egui/eframe + tray-icon) that embeds the agent. A shared egui `App` + `run()` (`app.rs`) plus per-OS bits (`platform.rs`: CJK font path, tray-only window policy). Builds on macOS and Windows; cross-compiles to `x86_64-pc-windows-gnu` (eframe's default glow/OpenGL backend links under mingw-w64 — no wgpu needed).
+- `crates/airpaste-tray`: cross-platform menu-bar / tray UI (egui/eframe + tray-icon) that embeds the agent. A shared egui `App` + `run()` (`app.rs`) plus per-OS bits (`platform.rs`: CJK font path; window policy — macOS Accessory/menu-bar-only, Windows keeps a normal taskbar button). `build.rs` embeds the git hash/date for the version footer. Builds on macOS and Windows; cross-compiles to `x86_64-pc-windows-gnu` (eframe's default glow/OpenGL backend links under mingw-w64 — no wgpu needed).
 
 ## Toolchain Notes
 
@@ -207,10 +254,11 @@ Pairing/trust:
 - The first registered device in a fresh DB is automatically trusted for bootstrap.
 - Later devices register as untrusted.
 - A non-first agent can confirm pairing by starting with `--pair-code <code>`.
-- Pairing code creation is still API-only through `POST /v1/pair/start`, but that route now requires a trusted request device.
+- Pairing codes are 6-digit numeric. They are minted through `POST /v1/pair/start` (requires a trusted request device) or from the tray window (「生成配对码」).
 - Untrusted devices may register and confirm pairing, but cannot list devices, create/read clips, list history, open WebSocket sync, or create relay sessions until trusted.
 - `POST /v1/devices` registration and `POST /v1/pair/confirm` remain usable by untrusted devices.
 - Clip `GET`/latest/history queries ignore expired clips. The store prunes expired clips opportunistically on clip creation and read paths.
+- The server refreshes a device's `last_seen_at` on WebSocket connect and on every 30s heartbeat tick; agents poll `GET /v1/devices` to derive presence (online = seen within 90s).
 
 ## Current Desktop Agent Behavior
 
@@ -233,8 +281,8 @@ The agent:
 - Runs a peer HTTP server on `--peer-bind`, default `0.0.0.0:17390` (LAN-reachable; protected by signed one-time-token requests).
 - Advertises and browses `_airpaste._tcp.local.` over mDNS, keeping a `device_id -> LAN address` directory. On download it prefers the discovered address over the manifest `source_peer_url`, so `--peer-public-url` is usually unnecessary on a LAN. mDNS failures fall back to `source_peer_url`.
 - Receives remote file manifests and records them as pending by default.
-- Downloads pending files on `Ctrl+Shift+V`, writes downloaded cache paths to Windows file clipboard, then sends normal paste.
-- On macOS, downloads pending files on `Ctrl+Shift+V` and writes downloaded cache file URLs to the pasteboard. Synthetic `Cmd+V` paste is still intentionally out of scope.
+- Downloads pending files on `Alt+V`, writes downloaded cache paths to Windows file clipboard, then sends normal paste.
+- On macOS, downloads pending files on `Option+V` and writes downloaded cache file URLs to the pasteboard. Auto-`Cmd+V` after a file apply is still intentionally out of scope (`REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY` is false on macOS).
 - Supports `--apply-latest-files-once` to fetch the latest remote file clip, download its files, write them to the local clipboard/pasteboard, print downloaded paths as JSON, and exit.
 - Pulls remote files through the server-mediated encrypted relay, either automatically when a direct/LAN download fails or always when started with `--prefer-relay true`. The recipient creates a relay session; the server pushes `TransferRelayReady` to both devices; both connect to `GET /v1/relay/{session_id}/ws`; the source serves files claimed from its `PeerFileRegistry` (same signed peer-file authorization as the direct path), sealing each file for the recipient with `airpaste-crypto::seal_bytes`; the server only forwards opaque frames. Direct/LAN transfer is still tried first by default.
 - Fallback is incremental: files already downloaded over the direct path are not re-pulled over the relay (the relay only requests still-missing indexes), and source grants are committed only after a file finishes streaming, so a transfer that fails partway can be completed over the relay instead of failing with `410 already served`.
@@ -251,6 +299,7 @@ Useful agent flags:
 - `--print-latest-clip`
 - `--publish-text-once`
 - `--apply-latest-files-once`
+- `--replay-latest-clip-signature` (smoke: assert the server rejects a replayed signed request with 401)
 - `--state-path`
 - `--peer-bind`
 - `--peer-public-url`
@@ -268,77 +317,87 @@ Useful agent flags:
 - `--publish-clipboard=false`
 - `--apply-remote=false`
 - `--prefer-relay true` (pull files through the encrypted relay instead of direct/LAN; takes an explicit `true`/`false` value)
-- `--clipboard-mode system|isolated` (default `system`; `isolated` enables the in-app inbox + Ctrl+Shift+C / Ctrl+Shift+V text channel)
+- `--clipboard-mode system|isolated` (default `system`; `isolated` enables the in-app inbox + the `Alt+C` / `Alt+V` channel — `Option+C` / `Option+V` on macOS)
 
 ## Isolated Clipboard Mode
 
-`--clipboard-mode isolated` decouples the AirPaste text channel from the system clipboard
-(text only for now; files keep the existing flow). Behaviour vs the default `system` mode:
+`--clipboard-mode isolated` decouples the AirPaste channel from the system clipboard.
+Behaviour vs the default `system` mode:
 
-- Inbound: a remote text clip is decrypted into an in-memory **inbox** (latest one) instead
-  of being written to the system clipboard. Log line: `stored remote text in isolated inbox`.
-  The system clipboard is never auto-overwritten — this also avoids the RDP `rdpclip`
-  clobbering loop.
-- Outbound: clipboard polling no longer auto-publishes text. Press **`Ctrl+Shift+C`** to push
-  the current selection: the agent synthesizes a copy, reads the selection off the clipboard,
-  restores the user's previous clipboard, and publishes the captured text.
-- Paste: press **`Ctrl+Shift+V`** to paste the inbox text into the focused app: the agent
-  saves the current clipboard, sets it to the inbox text, synthesizes paste, then restores
-  the saved clipboard. If the inbox is empty it falls back to the existing file-paste flow.
+- Inbound text: a remote text clip is decrypted into an in-memory **inbox** (bounded history,
+  newest first, `INBOX_HISTORY_MAX = 20`) instead of being written to the system clipboard.
+  Log line: `stored remote text in isolated inbox`. The system clipboard is never
+  auto-overwritten — this also avoids the RDP `rdpclip` clobbering loop.
+- Inbound files: a remote file clip is held as pending (files are never auto-applied in
+  either mode unless `--auto-apply-files=true`).
+- Outbound: clipboard polling no longer auto-publishes text. Copy normally (Cmd/Ctrl+C),
+  then press **`Alt+C`** (macOS **`Option+C`**): the agent publishes whatever is on the
+  system clipboard right now. No synthetic copy, no focus dependency, no Accessibility
+  requirement, and the user's clipboard is never touched. A clipboard unchanged since the
+  last push is skipped (de-dup against stale content / accidental double-press).
+- Paste: press **`Alt+V`** (macOS **`Option+V`**). Whichever channel arrived most recently
+  wins — inbox text or pending files (arrival-sequence based; falls back to the other when
+  the chosen one is empty):
+  - Text: save the current clipboard, set the newest inbox text, wait `CLIPBOARD_SETTLE`
+    (80ms), synthesize Cmd/Ctrl+V, wait `PASTE_CONSUME` (150ms), restore the saved clipboard.
+  - Files: download the pending files (direct → relay fallback) and write them to the
+    clipboard — the normal file flow.
 
 Implementation:
 
 - `crates/airpaste-agent/src/config.rs` — `ClipboardMode` enum + `--clipboard-mode`.
-- `crates/airpaste-agent/src/main.rs` — `ClipboardCtx` (mode + inbox), inbound routing,
-  outbound gating, and the `copy_selection_to_airpaste` / `paste_inbox_text` /
-  `read_after_copy` orchestration with a save/restore dance (timing consts `CLIPBOARD_SETTLE`,
-  `PASTE_CONSUME`, `COPY_POLL_*`).
-- `crates/airpaste-agent/src/paste/macos.rs` — **new** macOS synthetic copy/paste via
-  CoreGraphics `CGEvent` (Command+C / Command+V), plus `accessibility_trusted`
-  (`AXIsProcessTrusted`). Windows reuses `SendInput` (now `copy()` too).
-- `crates/airpaste-agent/src/hotkey/*` — second global hotkey (`Ctrl+Shift+C`), registered
-  only in isolated mode; the channel now carries a `HotkeyAction` (PasteRemote / CopyToAirPaste).
+- `crates/airpaste-agent/src/lib.rs` — `ClipboardCtx` (runtime mode flag shared with the
+  tray, inbox, per-channel arrival sequences), inbound routing, outbound gating,
+  `copy_selection_to_airpaste` (read-and-publish + `last_pushed` de-dup), `paste_inbox_text`
+  (save/set/paste/restore; timing consts `CLIPBOARD_SETTLE` / `PASTE_CONSUME`), and
+  `paste_remote_via_hotkey` (text-vs-files recency dispatch).
+- `crates/airpaste-agent/src/paste/macos.rs` — synthetic `Cmd+V` via CoreGraphics `CGEvent`,
+  plus `accessibility_trusted` (`AXIsProcessTrusted`). The Command flag is set explicitly on
+  each event, so a physically held Option (from the triggering hotkey) cannot mix into the
+  chord. `paste/windows.rs` (`SendInput`) prepends Alt/Ctrl key-up events for the same
+  reason. The old `copy()` synthesis was removed with the Alt+C redesign (`a351b50`).
+- `crates/airpaste-agent/src/hotkey/*` — second global hotkey (`Alt+C`), registered only in
+  isolated mode; the channel carries a `HotkeyAction` (PasteRemote / CopyToAirPaste).
 
 macOS requirement and caveats:
 
-- Synthetic copy/paste needs **Accessibility permission** (System Settings -> Privacy &
-  Security -> Accessibility). The agent logs a warning at startup in isolated mode if the
-  process is not trusted. Without it, `Ctrl+Shift+C/V` silently no-op. Note: a CLI binary does
-  not appear in the Accessibility list by itself — the grant attaches to the **launching app**
-  (the terminal / Claude Code / login item that starts the agent). Granting that app is what
-  makes the agent trusted; `AXIsProcessTrusted()` then returns true for the child agent.
-- The synthesized chord must wait for the triggering hotkey's Ctrl+Shift to be released first,
-  or the held modifiers combine with it (a synthetic Cmd+C arriving while Ctrl is down reads as
-  Ctrl+Cmd+C and copies nothing). The copy path sleeps `HOTKEY_MODIFIER_RELEASE` (120ms) before
-  `paste.copy()`; the paste path already waits via `CLIPBOARD_SETTLE` after `set_text`. This was
-  the one real bug found during real-hardware verification.
-- The save/restore timing (`CLIPBOARD_SETTLE` / `PASTE_CONSUME` / `HOTKEY_MODIFIER_RELEASE`) is
-  heuristic; if a target app is slow to read the clipboard the restore could race. Tune if needed.
+- Only the **paste direction** (`Option+V` into another app) needs **Accessibility
+  permission** (System Settings -> Privacy & Security -> Accessibility); `Option+C` is a
+  plain clipboard read. The agent logs a warning at startup in isolated mode if the process
+  is not trusted. Note: a CLI binary does not appear in the Accessibility list by itself —
+  the grant attaches to the **launching app** (the terminal / login item that starts the
+  agent). Granting that app is what makes the agent trusted; `AXIsProcessTrusted()` then
+  returns true for the child agent.
+- The save/restore timing (`CLIPBOARD_SETTLE` / `PASTE_CONSUME`) is heuristic; if a target
+  app is slow to read the clipboard the restore could race. Tune if needed.
+- Over RDP, `rdpclip` can delay clipboard updates by seconds, so `Alt+C` may still read a
+  stale clipboard; the de-dup keeps that from republishing the previous push, and the agent
+  logs a hint when no text is found.
 
-Verified on real macOS hardware (2026-06-07): with Accessibility granted to the launching app,
-`Ctrl+Shift+V` pastes the inbox text into TextEdit and leaves the system clipboard unchanged,
-and `Ctrl+Shift+C` captures the TextEdit selection (published clip length matched the selection)
-and restores the clipboard. The copy direction initially published the stale clipboard until the
-`HOTKEY_MODIFIER_RELEASE` delay was added.
+History: the original design synthesized Cmd/Ctrl+C on `Ctrl+Shift+C` with a save/restore
+dance and a 120ms `HOTKEY_MODIFIER_RELEASE` delay. It was verified on real macOS hardware
+(2026-06-07, TextEdit; clipboard preserved both directions) but was replaced on 2026-06-09
+(`a351b50`) by the read-current-clipboard semantics above — simpler, permission-free for the
+copy direction, and immune to the RDP copy race. The rebound `Alt` chords and the new `Alt+C`
+semantics have not yet had a recorded real-hardware pass on either OS.
 
-Manual test (needs a real GUI session + Accessibility granted; cannot be automated):
+Manual test (needs a real GUI session; Accessibility needed only for step 4 on macOS):
 
 1. Run a receiver: `airpaste-agent --server-url ... --pair-code <code> --clipboard-mode isolated`.
-   On macOS, grant the binary Accessibility and restart it.
 2. Put a sentinel on the local clipboard (copy any text normally).
-3. From another paired device, publish text (e.g. copy in isolated mode there, or
+3. From another paired device, publish text (e.g. copy + `Alt+C` there, or
    `--publish-text-once "hello from isolated"`). Confirm the receiver logs
    `stored remote text in isolated inbox` and the sentinel is still on the clipboard.
-4. Focus a text field, press `Ctrl+Shift+V`. Expect the inbox text to be typed in, and the
+4. Focus a text field, press `Alt+V`. Expect the inbox text to be typed in, and the
    clipboard to still hold the sentinel afterward.
-5. Select some text, press `Ctrl+Shift+C`. Expect it to be published (receiver log
-   `pushed selection to AirPaste`) and your clipboard unchanged.
+5. Copy some text normally, press `Alt+C`. Expect it to be published (sender log
+   `pushed clipboard to AirPaste`) and a second `Alt+C` to be skipped as unchanged
+   (`clipboard unchanged since last push, skipping`).
 
-On Windows there is a scripted helper for steps 1-5: `scripts/smoke-isolated.ps1` covers the
-headless inbound half (inbox stored, clipboard not overwritten), and
-`scripts/smoke-isolated-hotkey.ps1` is an interactive harness that sets up the receiver +
-sender, opens Notepad, prompts for the two hotkeys, and auto-checks the clipboard restore and
-the copy-publish.
+On Windows there is a scripted helper: `scripts/smoke-isolated.ps1` covers the headless
+inbound half (inbox stored, clipboard not overwritten), and `scripts/smoke-isolated-hotkey.ps1`
+is an interactive harness for the two hotkeys. **Both scripts' operator prompts still name the
+old `Ctrl+Shift` chords** — update them before the next Windows hotkey pass.
 
 ### Windows / RDP validation (2026-06-07)
 
@@ -359,6 +418,10 @@ synthesized copy raced `rdpclip`'s delayed clipboard rendering. On a local conso
 (or with clipboard redirection disabled in mstsc: Local Resources -> uncheck Clipboard) these
 are effectively instant. Polling longer is not a real fix for multi-second RDP latency (the
 hotkey would just hang), so the code is unchanged; retest the synthetic hotkeys off-RDP.
+
+(2026-06-09 update: the copy-direction race described above is gone by design — `Alt+C` no
+longer synthesizes a copy or reads back; it publishes the clipboard as-is. Only the generic
+multi-second `rdpclip` lag remains relevant.)
 
 ## Current File Transfer Security
 
@@ -413,9 +476,9 @@ Smoke coverage:
 - macOS scripted file URL publish, signed peer download, file URL pasteboard apply through `--apply-latest-files-once`.
 - macOS scripted encrypted-relay file pull (`scripts/smoke-relay-macos.sh`): forces `--prefer-relay true`, asserts the source served over the relay, the recipient downloaded via the relay, and the file is byte-exact (size + SHA-256). Also runs under `--auth-token`.
 - Peer file grant reservation unit tests (`airpaste-agent` `peer::tests`): a failed transfer releases the grant for retry, a completed transfer is one-time, and a rejected claim reserves nothing.
-- macOS scripted isolated-clipboard inbound test (`scripts/smoke-isolated-macos.sh`): a remote text clip is stored in the isolated inbox WITHOUT overwriting the system clipboard (sentinel survives, no system-clipboard apply path). Also runs under `--auth-token`. The synthetic Ctrl+Shift+C / Ctrl+Shift+V hotkeys are verified manually (see "Isolated Clipboard Mode").
+- macOS scripted isolated-clipboard inbound test (`scripts/smoke-isolated-macos.sh`): a remote text clip is stored in the isolated inbox WITHOUT overwriting the system clipboard (sentinel survives, no system-clipboard apply path). Also runs under `--auth-token`. The `Alt+C` / `Alt+V` hotkeys are verified manually (see "Isolated Clipboard Mode"; last recorded pass used the old `Ctrl+Shift` chords).
 - macOS scripted server auth token path.
-- macOS interactive `Ctrl+Shift+V` hotkey harness exists as `scripts/smoke-hotkey-macos.sh`.
+- macOS interactive remote-paste hotkey harness exists as `scripts/smoke-hotkey-macos.sh` (currently stale: it waits for the old `Ctrl+Shift+V` registration log line and will hang until updated for `Option+V`).
 - Trusted-device signed API guard path: missing signature returns `401`, untrusted signed request returns `403`, paired signed request is allowed, replayed nonce returns `401`.
 - Peer unauthenticated request returns `401`.
 - Repeated file index download returns `410`.
@@ -449,9 +512,10 @@ isolated-mode inbox text.
 
 The crate is split into a shared egui `App` + `run()` (`src/app.rs`, identical on both OSes)
 and the per-OS bits (`src/platform.rs`): the CJK font path (macOS system fonts vs Windows
-`C:\Windows\Fonts\msyh.ttc` Microsoft YaHei) and the tray-only window policy (macOS `Accessory`
-activation via winit; Windows `ViewportBuilder::with_taskbar(false)`, which egui maps to winit
-`skip_taskbar`). `main.rs` is a thin entry that calls `app::run()` on every platform, plus
+`C:\Windows\Fonts\msyh.ttc` Microsoft YaHei) and the window policy (macOS `Accessory`
+activation via winit — menu-bar-only; on Windows the earlier `with_taskbar(false)` skip-taskbar
+policy was **reverted** in `99bc776`, the window keeps a normal taskbar button so it can't be
+lost). `main.rs` is a thin entry that calls `app::run()` on every platform, plus
 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` to drop the console window
 in Windows release builds (a console-subsystem exe otherwise gets its own taskbar button).
 `winit` stays a macOS-only direct dependency (only the `Accessory` hook needs it); the GUI deps
@@ -464,9 +528,14 @@ cargo run -p airpaste-tray -- --server-url http://<host> --pair-code <code> --cl
 # or just `cargo run -p airpaste-tray` to use the agent defaults
 ```
 
-The window (Chinese UI) shows: connection status (● 已连接 / ○ 连接中), device + device id, an
-**isolated-mode checkbox** (toggles at runtime), and the latest received text with a "复制到剪贴板"
-button. The tray menu has 显示 / 退出.
+The window (Chinese UI) shows: a three-state connection status (● 已连接 / ✕ 连接失败:<err> /
+○ 连接中…), device + device id, checkboxes for **isolated mode** (runtime toggle), **start at
+login**, and **run an embedded server**, a collapsible **device list** (设备 N/M 在线, online
+dot / 本机 / 未信任 / last-seen per row), the **settings & pairing panel** (server URL / pair
+code / auth token +「保存并连接」+「生成配对码」), a **transfer progress bar**, **pending
+files** (count/size/names + the Alt+V hint), the **inbox history** (newest first, per-entry
+copy), and a pinned **build-version footer** (`v<ver> · <git-hash> · <date>`, `+` = dirty
+tree). The tray menu has 显示 / 退出.
 
 Implemented:
 
@@ -478,7 +547,7 @@ Implemented:
 - **Runtime isolated toggle**: isolated mode is a shared `AtomicBool` read live by the agent;
   `AgentHandle::set_isolated` + the checkbox flip it without restarting. The tray defaults to
   isolated (`AIRPASTE_CLIPBOARD_MODE`) so both hotkeys register. Caveat: the inbound/outbound
-  text behaviour toggles live, but the `Ctrl+Shift+C` hotkey is only registered if the agent
+  text behaviour toggles live, but the `Alt+C` hotkey is only registered if the agent
   *started* isolated (hotkeys cannot be re-registered after launch).
 
 Architecture: eframe owns the platform main-thread event loop; the agent runs on a background
@@ -535,6 +604,18 @@ UI features added (2026-06-08, after the initial Windows port — commits `06bf5
   B paste code → send/receive" is all in the window. Verified end-to-end on macOS (embedded
   server serves `/health`, the local agent connects to it, port frees on exit).
 
+UI features added (2026-06-10 — commits `99bc776`, `5a9ddfd`, `f86f6a0`):
+
+- **Build-version footer**: `build.rs` embeds the git short hash + commit date; a `+` marks a
+  dirty tree (tracked files only). Pinned at the bottom of the window and logged at startup.
+- **Peer-port bind retry**: the「保存并连接」re-exec could race the old process still holding
+  `:17390`; `peer::bind_with_retry` now retries `AddrInUse` 20 × 250ms instead of dying.
+- **Windows keeps its taskbar button**: skip-taskbar reverted (see the window-policy note above).
+- **Connected-devices view**: collapsible 设备(N/M 在线) list fed by
+  `AgentHandle::devices()` — a 5s background poll of `GET /v1/devices` with a 90s presence
+  window over the server-maintained `last_seen_at`. Defaults open when the embedded server is
+  running (that's the "who is connected to me" use case).
+
 Verified on macOS (isolated `HOME`): the tray reads `tray-config.json` with no CLI flags, pairs,
 connects, receives a clip into the inbox, and the pair code is cleared from the config afterwards;
 the icon artwork was eyeballed via an offline render; `dist/AirPaste.app` builds and launches
@@ -573,15 +654,21 @@ Transfer:
 
 Platform:
 
-- Windows supports clipboard text, file drop lists, `Ctrl+Shift+V`, and synthetic copy/paste.
-- macOS supports clipboard text, file URL read/write, `Ctrl+Shift+V`, one-shot file apply, and now synthetic copy/paste via CoreGraphics `CGEvent` (used by isolated mode; requires Accessibility permission). The file-paste flow on macOS still does not auto-`Cmd+V` after apply (`REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY` is false on macOS); only isolated-mode text paste synthesizes the keystroke so far.
-- Isolated clipboard mode now covers files too: a remote file clip is held as pending (not
-  auto-applied), and `Ctrl+Shift+V` applies whichever channel — inbox text or pending files —
+- Windows supports clipboard text, file drop lists, `Alt+V`, and synthetic paste (`SendInput`).
+- macOS supports clipboard text, file URL read/write, `Option+V`, one-shot file apply, and synthetic paste via CoreGraphics `CGEvent` (isolated-mode text paste; requires Accessibility permission). The file-paste flow on macOS still does not auto-`Cmd+V` after apply (`REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY` is false on macOS); only isolated-mode text paste synthesizes the keystroke.
+- Isolated clipboard mode covers files too: a remote file clip is held as pending (not
+  auto-applied), and `Alt+V` applies whichever channel — inbox text or pending files —
   arrived most recently (arrival-sequence based). The tray shows pending files
   (`AgentHandle::pending_files()`).
-- The macOS synthetic copy/paste has been verified on real macOS hardware (Ctrl+Shift+V and Ctrl+Shift+C into TextEdit, system clipboard preserved) with Accessibility granted to the launching app. Windows synthetic copy/paste (SendInput) is compiled but not yet exercised on a real Windows session.
-- The tray/menu-bar UI (`airpaste-tray`) runs on macOS and Windows; no settings UI, installer,
-  or service/login-item/autostart packaging yet.
+- Synthetic *copy* no longer exists: `Alt+C` reads the clipboard as-is (see "Isolated
+  Clipboard Mode"). The synthetic paste path was verified on real macOS hardware under the old
+  `Ctrl+Shift` chords; the rebound `Alt`/`Option` chords and the new `Alt+C` semantics have
+  not yet had a recorded real-hardware pass on either OS, and Windows synthetic paste has
+  never been exercised on a real session.
+- The tray/menu-bar UI (`airpaste-tray`) runs on macOS and Windows with in-window
+  settings/pairing, a start-at-login toggle, and lightweight packaging scripts
+  (`bundle-macos.sh` / `install-windows.ps1`); there is no real installer (dmg/MSI) or code
+  signing yet.
 
 ## Recommended Next Steps
 
@@ -628,21 +715,29 @@ make the source unreachable or pass `--prefer-relay`) before relying on it.
 
 ### 3b. Finish isolated clipboard mode
 
-- macOS synthetic `Ctrl+Shift+C` / `Ctrl+Shift+V` verified on real hardware (held-modifier
-  leak fixed via `HOTKEY_MODIFIER_RELEASE`). Still TODO: verify the same on a real **Windows**
-  session, and confirm the save/restore timing is reliable across more apps (browsers,
-  Electron) beyond TextEdit.
-- ~~Extend isolated mode to files.~~ Done: a pending file clip is held and `Ctrl+Shift+V` picks
+- The hotkeys were rebound to `Alt+C` / `Alt+V` (`a662481`) and `Alt+C` was re-semanticized to
+  publish the current clipboard — no synthetic copy, no Accessibility for the copy direction
+  (`a351b50`). The old `Ctrl+Shift` flow was verified on real hardware; the rebound chords and
+  the new `Alt+C` semantics still need a real-machine pass on **both** OSes, plus
+  save/restore timing checks across more apps (browsers, Electron) beyond TextEdit/Notepad.
+- **Update the smoke scripts for the new chords first**: `smoke-hotkey-macos.sh` waits for the
+  log line `registered remote paste hotkey Ctrl+Shift+V` and will hang (the agent now logs
+  `Option+V`); `smoke-isolated-hotkey.ps1` / `smoke-isolated.ps1` / `smoke-isolated-macos.sh`
+  still prompt for `Ctrl+Shift` in their operator text.
+- ~~Extend isolated mode to files.~~ Done: a pending file clip is held and `Alt+V` picks
   text vs files by arrival recency; the tray shows pending files. Verify the hotkey choice on a
   real session.
-- Consider a small inbox history (latest N) and a way to pick which entry to paste.
+- ~~Consider a small inbox history (latest N).~~ Done: bounded 20-entry history, newest first,
+  per-entry copy in the tray. Still open: a way to pick which entry `Alt+V` pastes (currently
+  always the newest).
 
 ### 3c. Menu-bar UI (`airpaste-tray`)
 
 Done: scaffold + agent wiring, Chinese UI (CJK font), menu-bar-only (accessory, close-to-hide),
 runtime isolated-mode toggle, **real app icon, inbox history, connection-error display,
-in-window pairing/config (persisted `TrayConfig` + re-exec reconnect), start-at-login toggle, and
-lightweight packaging (`bundle-macos.sh` / `install-windows.ps1`)** — see "Menu-bar UI". Next: a
+in-window pairing/config (persisted `TrayConfig` + re-exec reconnect), start-at-login toggle,
+lightweight packaging (`bundle-macos.sh` / `install-windows.ps1`), build-version footer,
+peer-port bind retry, and the connected-devices view** — see "Menu-bar UI". Next: a
 real-hardware pass on the config-panel「保存并连接」→ re-exec and the「开机自启」toggle; a designed
 PNG/`.icns` logo; richer pairing UX (device fingerprint compare).
 
@@ -658,7 +753,9 @@ needed. Then split `crates/airpaste-tray` into a shared egui `App` (`app.rs`) + 
 console window/taskbar button. Verified on the real Windows GNU host (release build via WinLibs):
 links, renders Chinese in 微软雅黑, no console, no taskbar button, tray icon present, and a full
 end-to-end connection (pair → ● 已连接 → isolated inbox populated → copy) via
-`scripts/smoke-tray-connect.ps1`. See "Menu-bar UI". Remaining: reliably click-test the tray
+`scripts/smoke-tray-connect.ps1`. See "Menu-bar UI". (2026-06-10 update: the skip-taskbar part
+was deliberately reverted in `99bc776` — the Windows window now keeps a normal taskbar button;
+the release build still has no console window.) Remaining: reliably click-test the tray
 right-click menu (显示/退出) and close-to-hide on Windows (the menu code is shared with the
 verified macOS path; the miss was a UI-automation targeting issue), then fold Windows UI
 follow-ups into 3c.
@@ -669,8 +766,8 @@ See `docs/MACOS_AGENT_PLAN.md`.
 
 Useful next macOS steps:
 
-- Manually verify `Ctrl+Shift+V` against Finder and common target apps.
-- Use `scripts/smoke-hotkey-macos.sh` as the first manual hotkey check; it prepares a pending file clip and waits for a real `Ctrl+Shift+V`.
-- Paste simulation now exists for macOS (`paste/macos.rs`, CoreGraphics `CGEvent`) with an Accessibility check; it is used by isolated-mode text paste and is the basis for wiring file-paste auto-`Cmd+V` later. Still needs real-session verification.
+- Manually verify `Option+V` against Finder and common target apps.
+- Use `scripts/smoke-hotkey-macos.sh` as the first manual hotkey check; it prepares a pending file clip and waits for a real `Option+V`. **It must be updated first** — it still waits for the `Ctrl+Shift+V` registration log line and will hang.
+- Paste simulation exists for macOS (`paste/macos.rs`, CoreGraphics `CGEvent`) with an Accessibility check; it is used by isolated-mode text paste and is the basis for wiring file-paste auto-`Cmd+V` later. Verified on real hardware under the old chords; not yet re-verified since the `Option` rebind.
 - Decide whether to replace or augment `arboard` with lower-level `NSPasteboard` glue if file URL behavior is not reliable enough.
 - Add LaunchAgent/login item packaging later, after CLI behavior is stable.

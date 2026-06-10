@@ -85,7 +85,7 @@ Current agent scope:
 - Windows file clipboard manifest publish via `CF_HDROP`.
 - MVP file payload download from source agent peer HTTP service into receiver cache.
 - Downloaded files are written back to the system clipboard as a file drop list.
-- Windows remote file paste hotkey: `Ctrl+Shift+V`.
+- Remote paste hotkey: `Alt+V` (macOS: `Option+V`). In isolated clipboard mode, `Alt+C` / `Option+C` publishes the current clipboard.
 - Text clips published by the agent default to a 600-second server-side TTL. Use `--text-clip-ttl-secs 0` to disable text expiry for debugging.
 - Automatic text clipboard publishing skips obvious sensitive content by default, including private keys, JWTs, bearer tokens, provider tokens (`ghp_`, `github_pat_`, `sk-`), secret-like assignments, one-time-code-like numbers, credit-card-like numbers, and text above `--max-text-clip-bytes`. Use `--filter-sensitive-text=false` for debugging.
 
@@ -101,7 +101,7 @@ File transfer MVP notes:
 - Receivers reject remote file manifests whose regular files exceed `--max-single-file-bytes`, stream peer downloads into temporary files, and verify downloaded byte counts plus SHA-256 before writing files into the cache. Older manifests without SHA-256 fall back to size-only verification with a warning.
 - Only regular files are downloaded in this MVP. Directories are announced in the manifest but skipped by transfer.
 - Downloaded files are written under `--cache-dir/<transfer_token>/`.
-- By default, a remote file manifest is only recorded as pending. Press `Ctrl+Shift+V` on the receiver to download the latest pending files, write them to the local clipboard, and send a normal paste.
+- By default, a remote file manifest is only recorded as pending. Press `Alt+V` (macOS: `Option+V`) on the receiver to download the latest pending files, write them to the local clipboard, and send a normal paste.
 - `--auto-apply-files=true` downloads remote files as soon as the manifest arrives. This is mainly useful for smoke tests and debugging.
 - `--apply-latest-files-once` downloads the latest remote file clip once, writes the downloaded file references to the local clipboard, prints the downloaded paths as JSON, and exits. This is useful for macOS hotkey/pasteboard debugging.
 - `--auto-paste-files=true` sends `Ctrl+V` to the current foreground app after an automatic file apply, so keep it disabled unless the receiver is intentionally focused on the target app.
@@ -120,4 +120,4 @@ scripts/smoke-agent-macos.sh --auth-token airpaste-smoke-secret
 scripts/smoke-hotkey-macos.sh
 ```
 
-`smoke-hotkey-macos.sh` is interactive: it prepares a pending file clip, then waits for you to press `Ctrl+Shift+V`.
+`smoke-hotkey-macos.sh` is interactive: it prepares a pending file clip, then waits for you to press the remote paste hotkey (`Option+V`). Note: the script itself still references the old `Ctrl+Shift+V` chord and needs updating before use.
