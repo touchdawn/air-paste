@@ -863,3 +863,21 @@ Useful next macOS steps:
 - Paste simulation exists for macOS (`paste/macos.rs`, CoreGraphics `CGEvent`) with an Accessibility check; it is used by isolated-mode text paste and is the basis for wiring file-paste auto-`Cmd+V` later. Verified on real hardware under the old chords; not yet re-verified since the `Option` rebind.
 - Decide whether to replace or augment `arboard` with lower-level `NSPasteboard` glue if file URL behavior is not reliable enough.
 - Add LaunchAgent/login item packaging later, after CLI behavior is stable.
+
+## Windows Rebuild Validation (2026-06-10, `5b0cf1c`)
+
+Fetched Gitee `main` and fast-forwarded local `main` to `5b0cf1c` (`feat(tray): paste images
+and files into the send tab with Cmd+V (macOS)`). The literal MSVC command
+`cargo build --release -p airpaste-tray` failed before compiling project code because this
+machine has no Windows SDK/MSVC import libs in the environment (`rust-lld` could not open
+`kernel32.lib`, `ntdll.lib`, `userenv.lib`, `ws2_32.lib`, `dbghelp.lib`); this was not an
+`arboard`/`image-data` regression.
+
+Rebuilt using the documented Windows path instead:
+`$env:PATH = "D:\ep\air-paste\tools\winlibs\mingw64\bin;$env:PATH"; cargo
++stable-x86_64-pc-windows-gnu build --release -p airpaste-tray`, which completed cleanly.
+No old tray process was running; `scripts/smoke-tray-connect.ps1` was then run with the same
+WinLibs PATH and passed. It left `target\debug\airpaste-server.exe` and the new
+`target\release\airpaste-tray.exe` running for inspection; the tray log showed pairing
+confirmed, agent started, Windows hotkeys registered, and `stored remote text in isolated
+inbox`.
