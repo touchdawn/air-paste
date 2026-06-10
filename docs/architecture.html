@@ -1,0 +1,863 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AirPaste 架构学习图</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --ink: #1e2732;
+      --muted: #657181;
+      --line: #d2dbe6;
+      --blue: #2f6fbd;
+      --green: #2d8a62;
+      --cyan: #197c85;
+      --amber: #b7791f;
+      --red: #b94a48;
+      --soft-blue: #edf4ff;
+      --soft-green: #edf8f2;
+      --soft-cyan: #ecf7f8;
+      --soft-amber: #fff6df;
+      --shadow: 0 14px 36px rgba(26, 35, 45, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 48px;
+    }
+
+    header {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 32px;
+      line-height: 1.2;
+      font-weight: 780;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      font-size: 21px;
+      line-height: 1.3;
+      margin-bottom: 10px;
+    }
+
+    h3 {
+      font-size: 16px;
+      margin-bottom: 8px;
+    }
+
+    .lede {
+      max-width: 860px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .learning-shell {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: auto auto auto minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+
+    .icon-button {
+      display: inline-grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      border: 1px solid #bac6d4;
+      border-radius: 8px;
+      background: #fff;
+      color: #27313c;
+      cursor: pointer;
+      transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+    }
+
+    .icon-button:hover {
+      border-color: #8eb0dd;
+      background: #eef5ff;
+    }
+
+    .icon-button:active {
+      transform: translateY(1px);
+    }
+
+    .icon-button svg {
+      width: 18px;
+      height: 18px;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: none;
+    }
+
+    .step-copy {
+      min-width: 0;
+      padding-left: 4px;
+    }
+
+    .step-kicker {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 760;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .step-title {
+      margin-top: 1px;
+      font-size: 18px;
+      line-height: 1.28;
+      font-weight: 780;
+    }
+
+    .step-body {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .step-tabs {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 8px;
+      padding: 12px 18px 16px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .step-tab {
+      min-height: 38px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: #3f4b59;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 720;
+      cursor: pointer;
+      text-align: center;
+      transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+    }
+
+    .step-tab:hover {
+      border-color: #9db8d9;
+      background: #f3f8ff;
+    }
+
+    .step-tab.is-active {
+      border-color: var(--blue);
+      background: var(--soft-blue);
+      color: #1f5798;
+    }
+
+    .stage-wrap {
+      padding: 18px;
+      background:
+        linear-gradient(90deg, rgba(47, 111, 189, 0.045) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(47, 111, 189, 0.045) 1px, transparent 1px),
+        #fbfdff;
+      background-size: 28px 28px;
+    }
+
+    .stage {
+      display: block;
+      width: 100%;
+      height: auto;
+      min-height: 430px;
+    }
+
+    .lane {
+      fill: rgba(255, 255, 255, 0.74);
+      stroke: #e0e7ef;
+      stroke-width: 1;
+      rx: 8;
+    }
+
+    .lane-label {
+      fill: var(--muted);
+      font-size: 13px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .node {
+      fill: #fff;
+      stroke: #b7c3d0;
+      stroke-width: 1.5;
+      rx: 8;
+      transition: stroke-width 180ms ease, filter 180ms ease, opacity 180ms ease;
+    }
+
+    .node.source {
+      stroke: var(--green);
+    }
+
+    .node.server {
+      stroke: var(--blue);
+    }
+
+    .node.target {
+      stroke: var(--cyan);
+    }
+
+    .node.mdns {
+      fill: #fffdf8;
+      stroke: var(--amber);
+      stroke-dasharray: 7 5;
+    }
+
+    .node.is-active {
+      stroke-width: 3;
+      filter: drop-shadow(0 0 13px rgba(47, 111, 189, 0.2));
+    }
+
+    .node-title {
+      fill: var(--ink);
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .node-subtitle {
+      fill: var(--muted);
+      font-size: 12px;
+      font-weight: 620;
+    }
+
+    .pill {
+      fill: #f7f9fb;
+      stroke: #d5dee8;
+      stroke-width: 1;
+      rx: 6;
+    }
+
+    .pill-text {
+      fill: #2d3742;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .route,
+    .route-label-bg,
+    .route-label,
+    .packet {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease;
+    }
+
+    .route {
+      fill: none;
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 14 11;
+      animation: route-flow 900ms linear infinite;
+    }
+
+    .route.blue {
+      stroke: var(--blue);
+    }
+
+    .route.green {
+      stroke: var(--green);
+    }
+
+    .route.cyan {
+      stroke: var(--cyan);
+    }
+
+    .route.amber {
+      stroke: var(--amber);
+    }
+
+    .route.red {
+      stroke: var(--red);
+      stroke-dasharray: 7 9;
+    }
+
+    .route.is-active,
+    .route-label-bg.is-active,
+    .route-label.is-active,
+    .packet.is-active {
+      opacity: 1;
+    }
+
+    .route-label-bg {
+      fill: #fff;
+      stroke: #dfe6ee;
+      stroke-width: 1;
+      rx: 5;
+    }
+
+    .route-label-bg.is-active {
+      fill: #fff8e8;
+      stroke: #edca72;
+    }
+
+    .route-label {
+      fill: #27313c;
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    .packet.blue {
+      fill: var(--blue);
+    }
+
+    .packet.green {
+      fill: var(--green);
+    }
+
+    .packet.cyan {
+      fill: var(--cyan);
+    }
+
+    .packet.amber {
+      fill: var(--amber);
+    }
+
+    .packet.red {
+      fill: var(--red);
+    }
+
+    .paused .route {
+      animation-play-state: paused;
+    }
+
+    @keyframes route-flow {
+      to {
+        stroke-dashoffset: -25;
+      }
+    }
+
+    .explain-grid {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 18px;
+      box-shadow: 0 8px 22px rgba(26, 35, 45, 0.05);
+    }
+
+    ol,
+    ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    li + li {
+      margin-top: 8px;
+    }
+
+    code {
+      padding: 1px 5px;
+      border: 1px solid #dce3ea;
+      border-radius: 4px;
+      background: #eef2f6;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.95em;
+    }
+
+    .note {
+      color: var(--muted);
+    }
+
+    .file-links {
+      display: grid;
+      gap: 8px;
+    }
+
+    a {
+      color: var(--blue);
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 900px) {
+      main {
+        width: min(100% - 20px, 1180px);
+        padding-top: 20px;
+      }
+
+      h1 {
+        font-size: 27px;
+      }
+
+      .toolbar {
+        grid-template-columns: auto auto auto;
+      }
+
+      .step-copy {
+        grid-column: 1 / -1;
+        padding-left: 0;
+      }
+
+      .step-tabs {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .explain-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .stage-wrap {
+        padding: 10px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .route {
+        animation: none;
+      }
+
+      .icon-button,
+      .step-tab,
+      .node,
+      .route,
+      .route-label-bg,
+      .route-label,
+      .packet {
+        transition: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="badges" aria-label="项目状态">
+        <span class="badge">当前实现：agent + server</span>
+        <span class="badge">文本走 server</span>
+        <span class="badge">文件走 LAN 直连</span>
+        <span class="badge">mDNS 只负责发现地址</span>
+      </div>
+      <h1>AirPaste 架构学习图</h1>
+      <p class="lede">
+        这版把图拆成 6 个步骤。默认只显示当前步骤相关的箭头，先看控制面，再看 mDNS，再看文件直连，避免所有线一起出现。
+      </p>
+    </header>
+
+    <section class="learning-shell" aria-labelledby="diagram-title">
+      <div class="toolbar">
+        <button class="icon-button" id="play-toggle" type="button" aria-label="暂停动画" title="暂停动画"></button>
+        <button class="icon-button" id="prev-step" type="button" aria-label="上一步" title="上一步">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m15 18-6-6 6-6"></path>
+          </svg>
+        </button>
+        <button class="icon-button" id="next-step" type="button" aria-label="下一步" title="下一步">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m9 18 6-6-6-6"></path>
+          </svg>
+        </button>
+        <div class="step-copy">
+          <p class="step-kicker">Step <span id="step-number">1</span>/<span id="step-total">6</span></p>
+          <p class="step-title" id="step-title"></p>
+          <p class="step-body" id="step-body"></p>
+        </div>
+      </div>
+
+      <div class="step-tabs" id="step-tabs" role="list" aria-label="架构步骤"></div>
+
+      <div class="stage-wrap">
+        <svg class="stage" viewBox="0 0 1120 610" role="img" aria-labelledby="svg-title svg-desc">
+          <title id="svg-title">AirPaste architecture learning diagram</title>
+          <desc id="svg-desc">A step-by-step diagram showing source agent, server, target agent, mDNS discovery, and direct peer file transfer.</desc>
+          <defs>
+            <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f6fbd"></path>
+            </marker>
+            <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#2d8a62"></path>
+            </marker>
+            <marker id="arrow-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#197c85"></path>
+            </marker>
+            <marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#b7791f"></path>
+            </marker>
+            <marker id="arrow-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#b94a48"></path>
+            </marker>
+            <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="9" stdDeviation="8" flood-color="#1d2329" flood-opacity="0.10"></feDropShadow>
+            </filter>
+          </defs>
+
+          <rect x="28" y="34" width="1064" height="300" class="lane"></rect>
+          <text x="48" y="62" class="lane-label">控制面：身份、信任、clip 元数据、WebSocket 通知</text>
+          <rect x="28" y="356" width="1064" height="96" class="lane"></rect>
+          <text x="48" y="384" class="lane-label">发现层：mDNS 在同一局域网内把 device_id 解析成 LAN 地址</text>
+          <rect x="28" y="474" width="1064" height="104" class="lane"></rect>
+          <text x="48" y="502" class="lane-label">数据面：文件内容不经过 server，接收端直接向源 agent 下载</text>
+
+          <rect x="70" y="94" width="265" height="210" class="node source" data-token="source" filter="url(#soft-shadow)"></rect>
+          <text x="96" y="132" class="node-title">源设备 Agent A</text>
+          <text x="96" y="154" class="node-subtitle">读剪贴板 / 发布 clip / 提供文件下载</text>
+          <rect x="96" y="180" width="98" height="34" class="pill"></rect>
+          <text x="115" y="202" class="pill-text">clipboard</text>
+          <rect x="210" y="180" width="98" height="34" class="pill"></rect>
+          <text x="229" y="202" class="pill-text">encrypt</text>
+          <rect x="96" y="230" width="98" height="34" class="pill"></rect>
+          <text x="113" y="252" class="pill-text">manifest</text>
+          <rect x="210" y="230" width="98" height="34" class="pill"></rect>
+          <text x="225" y="252" class="pill-text">peer :17390</text>
+
+          <rect x="428" y="82" width="265" height="234" class="node server" data-token="server" filter="url(#soft-shadow)"></rect>
+          <text x="454" y="120" class="node-title">airpaste-server</text>
+          <text x="454" y="142" class="node-subtitle">REST / WebSocket / redb store</text>
+          <rect x="454" y="168" width="96" height="34" class="pill"></rect>
+          <text x="474" y="190" class="pill-text">devices</text>
+          <rect x="570" y="168" width="96" height="34" class="pill"></rect>
+          <text x="590" y="190" class="pill-text">pairing</text>
+          <rect x="454" y="218" width="96" height="34" class="pill"></rect>
+          <text x="480" y="240" class="pill-text">clips</text>
+          <rect x="570" y="218" width="96" height="34" class="pill"></rect>
+          <text x="594" y="240" class="pill-text">ws</text>
+          <rect x="454" y="268" width="212" height="30" class="pill"></rect>
+          <text x="475" y="288" class="pill-text">只存密文 text / files manifest</text>
+
+          <rect x="785" y="94" width="265" height="210" class="node target" data-token="target" filter="url(#soft-shadow)"></rect>
+          <text x="811" y="132" class="node-title">接收设备 Agent B</text>
+          <text x="811" y="154" class="node-subtitle">收事件 / 解密 / 写本地剪贴板</text>
+          <rect x="811" y="180" width="98" height="34" class="pill"></rect>
+          <text x="831" y="202" class="pill-text">listen ws</text>
+          <rect x="925" y="180" width="98" height="34" class="pill"></rect>
+          <text x="945" y="202" class="pill-text">GET clip</text>
+          <rect x="811" y="230" width="98" height="34" class="pill"></rect>
+          <text x="829" y="252" class="pill-text">decrypt</text>
+          <rect x="925" y="230" width="98" height="34" class="pill"></rect>
+          <text x="942" y="252" class="pill-text">pasteboard</text>
+
+          <rect x="322" y="390" width="476" height="42" class="node mdns" data-token="mdns"></rect>
+          <text x="352" y="416" class="node-title">mDNS：_airpaste._tcp.local.</text>
+          <text x="602" y="416" class="node-subtitle">TXT: device_id / device_name</text>
+
+          <path d="M 202 94 C 202 68 470 64 560 82" class="route blue" data-token="startup-source" marker-end="url(#arrow-blue)"></path>
+          <rect x="312" y="50" width="156" height="25" class="route-label-bg" data-token="startup-source"></rect>
+          <text x="324" y="67" class="route-label" data-token="startup-source">register / signed REST</text>
+          <circle r="6" class="packet blue" data-token="startup-source">
+            <animateMotion dur="2.4s" repeatCount="indefinite" path="M 202 94 C 202 68 470 64 560 82"></animateMotion>
+          </circle>
+
+          <path d="M 918 94 C 918 66 650 64 560 82" class="route blue" data-token="startup-target" marker-end="url(#arrow-blue)"></path>
+          <rect x="684" y="50" width="144" height="25" class="route-label-bg" data-token="startup-target"></rect>
+          <text x="696" y="67" class="route-label" data-token="startup-target">register / ws hello</text>
+          <circle r="6" class="packet blue" data-token="startup-target">
+            <animateMotion dur="2.4s" repeatCount="indefinite" path="M 918 94 C 918 66 650 64 560 82"></animateMotion>
+          </circle>
+
+          <path d="M 335 176 L 428 176" class="route blue" data-token="text-publish" marker-end="url(#arrow-blue)"></path>
+          <rect x="342" y="143" width="118" height="25" class="route-label-bg" data-token="text-publish"></rect>
+          <text x="354" y="160" class="route-label" data-token="text-publish">POST /v1/clips</text>
+          <circle r="6" class="packet blue" data-token="text-publish">
+            <animateMotion dur="1.7s" repeatCount="indefinite" path="M 335 176 L 428 176"></animateMotion>
+          </circle>
+
+          <path d="M 693 178 L 785 178" class="route blue" data-token="text-notify" marker-end="url(#arrow-blue)"></path>
+          <rect x="704" y="145" width="118" height="25" class="route-label-bg" data-token="text-notify"></rect>
+          <text x="716" y="162" class="route-label" data-token="text-notify">WS ClipCreated</text>
+          <circle r="6" class="packet blue" data-token="text-notify">
+            <animateMotion dur="1.7s" repeatCount="indefinite" path="M 693 178 L 785 178"></animateMotion>
+          </circle>
+
+          <path d="M 785 252 L 693 252" class="route blue" data-token="text-fetch" marker-end="url(#arrow-blue)"></path>
+          <rect x="704" y="260" width="92" height="25" class="route-label-bg" data-token="text-fetch"></rect>
+          <text x="716" y="277" class="route-label" data-token="text-fetch">GET clip</text>
+          <circle r="6" class="packet blue" data-token="text-fetch">
+            <animateMotion dur="1.7s" repeatCount="indefinite" path="M 785 252 L 693 252"></animateMotion>
+          </circle>
+
+          <path d="M 204 304 L 390 390" class="route amber" data-token="mdns-advertise" marker-end="url(#arrow-amber)"></path>
+          <rect x="216" y="340" width="122" height="25" class="route-label-bg" data-token="mdns-advertise"></rect>
+          <text x="228" y="357" class="route-label" data-token="mdns-advertise">advertise service</text>
+          <circle r="6" class="packet amber" data-token="mdns-advertise">
+            <animateMotion dur="2s" repeatCount="indefinite" path="M 204 304 L 390 390"></animateMotion>
+          </circle>
+
+          <path d="M 916 304 L 730 390" class="route amber" data-token="mdns-browse" marker-end="url(#arrow-amber)"></path>
+          <rect x="782" y="340" width="108" height="25" class="route-label-bg" data-token="mdns-browse"></rect>
+          <text x="794" y="357" class="route-label" data-token="mdns-browse">browse service</text>
+          <circle r="6" class="packet amber" data-token="mdns-browse">
+            <animateMotion dur="2s" repeatCount="indefinite" path="M 916 304 L 730 390"></animateMotion>
+          </circle>
+
+          <path d="M 908 390 L 798 411" class="route amber" data-token="mdns-result" marker-end="url(#arrow-amber)"></path>
+          <rect x="836" y="412" width="160" height="25" class="route-label-bg" data-token="mdns-result"></rect>
+          <text x="848" y="429" class="route-label" data-token="mdns-result">device_id -> LAN addr</text>
+          <circle r="6" class="packet amber" data-token="mdns-result">
+            <animateMotion dur="1.8s" repeatCount="indefinite" path="M 908 390 L 798 411"></animateMotion>
+          </circle>
+
+          <path d="M 918 520 L 202 520" class="route cyan" data-token="file-request" marker-end="url(#arrow-cyan)"></path>
+          <rect x="418" y="492" width="284" height="25" class="route-label-bg" data-token="file-request"></rect>
+          <text x="430" y="509" class="route-label" data-token="file-request">GET /v1/files/{token}/{index} + signature</text>
+          <circle r="6" class="packet cyan" data-token="file-request">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M 918 520 L 202 520"></animateMotion>
+          </circle>
+
+          <path d="M 202 556 L 918 556" class="route green" data-token="file-stream" marker-end="url(#arrow-green)"></path>
+          <rect x="472" y="562" width="176" height="25" class="route-label-bg" data-token="file-stream"></rect>
+          <text x="484" y="579" class="route-label" data-token="file-stream">stream file bytes over LAN</text>
+          <circle r="6" class="packet green" data-token="file-stream">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M 202 556 L 918 556"></animateMotion>
+          </circle>
+
+          <path d="M 918 544 C 760 606 360 606 202 544" class="route red" data-token="fallback" marker-end="url(#arrow-red)"></path>
+          <rect x="414" y="584" width="292" height="25" class="route-label-bg" data-token="fallback"></rect>
+          <text x="426" y="601" class="route-label" data-token="fallback">mDNS 失败：使用 manifest.source_peer_url</text>
+          <circle r="6" class="packet red" data-token="fallback">
+            <animateMotion dur="3s" repeatCount="indefinite" path="M 918 544 C 760 606 360 606 202 544"></animateMotion>
+          </circle>
+        </svg>
+      </div>
+    </section>
+
+    <section class="explain-grid" aria-label="文字说明">
+      <article class="card">
+        <h2>怎么读这张图</h2>
+        <ol>
+          <li><strong>Server 是控制面。</strong>它负责设备注册、信任、clip 元数据和 WebSocket 通知。</li>
+          <li><strong>文本内容走 server。</strong>但文本在 agent 端已经端到端加密，server 保存的是密文。</li>
+          <li><strong>文件内容不走 server。</strong>server 只保存文件 manifest，真正字节由接收端从源 agent 下载。</li>
+          <li><strong>mDNS 不是传文件。</strong>它只帮接收端发现源设备在局域网里的 <code>IP:port</code>。</li>
+        </ol>
+      </article>
+
+      <article class="card">
+        <h2>代码入口</h2>
+        <div class="file-links">
+          <a href="../crates/airpaste-agent/src/main.rs">agent runtime / clipboard flow：crates/airpaste-agent/src/main.rs</a>
+          <a href="../crates/airpaste-agent/src/discovery.rs">mDNS discovery：crates/airpaste-agent/src/discovery.rs</a>
+          <a href="../crates/airpaste-agent/src/peer.rs">peer file server：crates/airpaste-agent/src/peer.rs</a>
+          <a href="../crates/airpaste-server/src/routes.rs">server REST routes：crates/airpaste-server/src/routes.rs</a>
+          <a href="../crates/airpaste-server/src/ws.rs">server WebSocket：crates/airpaste-server/src/ws.rs</a>
+          <a href="../crates/airpaste-protocol/src/api.rs">shared API types：crates/airpaste-protocol/src/api.rs</a>
+        </div>
+        <p class="note" style="margin-top: 14px;">
+          当前版本 relay 数据通道还没实现，所以跨网段文件传输依赖 <code>--peer-public-url</code> 或可达的源设备地址。
+        </p>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const steps = [
+        {
+          tab: "启动",
+          title: "两个 agent 先接入 server",
+          body: "A 和 B 都注册设备身份、建立签名 REST 能力，并通过 WebSocket 保持在线。",
+          tokens: ["source", "server", "target", "startup-source", "startup-target"]
+        },
+        {
+          tab: "文本发布",
+          title: "源设备把加密后的文本发布到 server",
+          body: "A 读取剪贴板文本，过滤明显敏感内容，端到端加密后 POST 到 /v1/clips。",
+          tokens: ["source", "server", "text-publish"]
+        },
+        {
+          tab: "文本应用",
+          title: "接收设备收到事件后拉取并解密",
+          body: "server 广播 ClipCreated；B 再 GET clip，解密成功后写入本机剪贴板。",
+          tokens: ["server", "target", "text-notify", "text-fetch"]
+        },
+        {
+          tab: "mDNS",
+          title: "mDNS 只解决局域网地址发现",
+          body: "A 广播 _airpaste._tcp.local.，B 浏览同名服务，得到 source device_id 对应的 LAN 地址。",
+          tokens: ["source", "target", "mdns", "mdns-advertise", "mdns-browse", "mdns-result"]
+        },
+        {
+          tab: "文件下载",
+          title: "文件字节走 agent 到 agent 直连",
+          body: "B 用 mDNS 发现的地址请求 A 的 peer HTTP 服务，A 校验签名后把文件流回 B。",
+          tokens: ["source", "target", "file-request", "file-stream"]
+        },
+        {
+          tab: "回退",
+          title: "mDNS 不通时使用 source_peer_url",
+          body: "跨网段、VPN、公网或防火墙场景下，B 会回退到 manifest 里的 source_peer_url。",
+          tokens: ["source", "target", "fallback"]
+        }
+      ];
+
+      const svg = document.querySelector(".stage");
+      const playToggle = document.getElementById("play-toggle");
+      const prevStep = document.getElementById("prev-step");
+      const nextStep = document.getElementById("next-step");
+      const stepTabs = document.getElementById("step-tabs");
+      const stepNumber = document.getElementById("step-number");
+      const stepTotal = document.getElementById("step-total");
+      const stepTitle = document.getElementById("step-title");
+      const stepBody = document.getElementById("step-body");
+
+      if (!svg || !playToggle || !prevStep || !nextStep || !stepTabs) {
+        return;
+      }
+
+      const icons = {
+        play: '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="8 5 19 12 8 19 8 5" fill="currentColor" stroke="none"></polygon></svg>',
+        pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="5" width="3.5" height="14" rx="1" fill="currentColor" stroke="none"></rect><rect x="13.5" y="5" width="3.5" height="14" rx="1" fill="currentColor" stroke="none"></rect></svg>'
+      };
+
+      const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      let currentStep = 0;
+      let playing = !prefersReducedMotion;
+      let timer = null;
+
+      stepTotal.textContent = String(steps.length);
+      steps.forEach((step, index) => {
+        const button = document.createElement("button");
+        button.className = "step-tab";
+        button.type = "button";
+        button.textContent = `${index + 1}. ${step.tab}`;
+        button.setAttribute("role", "listitem");
+        button.setAttribute("aria-label", `跳到第 ${index + 1} 步：${step.title}`);
+        button.addEventListener("click", () => goToStep(index, true));
+        stepTabs.appendChild(button);
+      });
+
+      function renderStep() {
+        const step = steps[currentStep];
+        const activeTokens = new Set(step.tokens);
+
+        document.querySelectorAll("[data-token]").forEach((element) => {
+          element.classList.toggle("is-active", activeTokens.has(element.dataset.token));
+        });
+
+        stepTabs.querySelectorAll(".step-tab").forEach((button, index) => {
+          const active = index === currentStep;
+          button.classList.toggle("is-active", active);
+          button.setAttribute("aria-current", active ? "step" : "false");
+        });
+
+        stepNumber.textContent = String(currentStep + 1);
+        stepTitle.textContent = step.title;
+        stepBody.textContent = step.body;
+      }
+
+      function setPlayIcon() {
+        playToggle.innerHTML = playing ? icons.pause : icons.play;
+        playToggle.setAttribute("aria-label", playing ? "暂停动画" : "播放动画");
+        playToggle.setAttribute("title", playing ? "暂停动画" : "播放动画");
+      }
+
+      function setAnimationPaused(paused) {
+        document.body.classList.toggle("paused", paused);
+        if (paused && typeof svg.pauseAnimations === "function") {
+          svg.pauseAnimations();
+        }
+        if (!paused && typeof svg.unpauseAnimations === "function") {
+          svg.unpauseAnimations();
+        }
+      }
+
+      function setPlaying(nextPlaying) {
+        playing = nextPlaying;
+        window.clearInterval(timer);
+        timer = null;
+        setAnimationPaused(!playing);
+        if (playing) {
+          timer = window.setInterval(() => goToStep(currentStep + 1, false), 4200);
+        }
+        setPlayIcon();
+      }
+
+      function goToStep(index, manual) {
+        currentStep = (index + steps.length) % steps.length;
+        renderStep();
+        if (manual) {
+          setPlaying(false);
+        }
+      }
+
+      playToggle.addEventListener("click", () => setPlaying(!playing));
+      prevStep.addEventListener("click", () => goToStep(currentStep - 1, true));
+      nextStep.addEventListener("click", () => goToStep(currentStep + 1, true));
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          window.clearInterval(timer);
+          timer = null;
+          setAnimationPaused(true);
+        } else if (playing) {
+          setPlaying(true);
+        }
+      });
+
+      renderStep();
+      setPlaying(playing);
+    })();
+  </script>
+</body>
+</html>
