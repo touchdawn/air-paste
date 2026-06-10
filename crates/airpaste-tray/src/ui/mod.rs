@@ -73,12 +73,18 @@ pub fn primary_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Res
     let fill = if enabled {
         theme::ACCENT
     } else {
-        theme::ACCENT.gamma_multiply(0.4)
+        theme::ACCENT.gamma_multiply(0.55)
     };
-    let text_color = egui::Color32::WHITE.gamma_multiply(if enabled { 1.0 } else { 0.7 });
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(egui::RichText::new(text).color(text_color)).fill(fill),
+    let text_color = egui::Color32::WHITE.gamma_multiply(if enabled { 1.0 } else { 0.85 });
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).color(text_color))
+            .fill(fill)
+            .sense(sense),
     )
 }
 
