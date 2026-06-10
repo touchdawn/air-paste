@@ -2,9 +2,61 @@
 
 [English](README.md) | 简体中文
 
-Air Paste 是一个基于 Rust 的 Windows / macOS 共享剪贴板工具。
+Air Paste 是一个基于 Rust 的 Windows / macOS 共享剪贴板工具：在设备 A 复制文本或文件，在设备 B 按一个快捷键就能粘贴。文本端到端加密；文件在局域网内点对点传输（无法直连时自动回退到加密的服务器中继），服务器永远不存储文件内容。
 
-设计目标：
+## 日常怎么用
+
+在每台设备上运行托盘应用（`airpaste-tray`，常驻 macOS 菜单栏 / Windows 系统托盘）。然后：
+
+- **发送**：正常复制（`Cmd+C` / `Ctrl+C`），再按 **`Option+C`**（macOS）/ **`Alt+C`**（Windows），内容就发布到了其他设备。
+- **接收**：聚焦目标应用，按 **`Option+V`** / **`Alt+V`** —— 最近一条文本会被粘贴；如果最近收到的是文件，则下载并粘贴文件。
+- 不想用快捷键也可以全在窗口里完成：输入文字点「发送」、把文件拖进窗口发送、在收件箱点「复制」/「下载」接收。
+
+## 快速开始（纯 GUI，不碰命令行）
+
+准备两台设备 A、B，A 兼作服务器。
+
+先在每台设备上编译并启动托盘应用（暂未提供安装包）：
+
+```bash
+# macOS
+scripts/bundle-macos.sh && open dist/AirPaste.app
+```
+
+```powershell
+# Windows（需先准备工具链，见下文「编译」）
+cargo +stable-x86_64-pc-windows-gnu run -p airpaste-tray
+```
+
+接下来全部在托盘窗口里操作：
+
+1. **A**：打开设置面板，服务器地址保持默认 `http://127.0.0.1:14444`，勾选 **「本机作为服务器」**，点 **「保存并连接」**。A 是第一台设备，自动信任 → `● 已连接`。
+2. **A**：点 **「生成配对码」**，记下 6 位数字码。
+3. **B**：服务器地址填 A 的局域网地址（`http://<A的IP>:14444`），填入配对码，点 **「保存并连接」** → `● 已连接`。
+4. 在一台设备复制后按 `Option+C` / `Alt+C` 发送，在另一台按 `Option+V` / `Alt+V` 粘贴。搞定。
+
+> macOS：需要给托盘应用授权辅助功能（系统设置 → 隐私与安全性 → 辅助功能），否则粘贴快捷键无法向其他应用输入。想开机自启就在每台设备上勾选 **「开机自启」**。
+
+完整教程 —— CLI 用法、配对细节、认证令牌、故障排查 —— 见 [docs/USER_MANUAL.md](docs/USER_MANUAL.md)。
+
+## 编译
+
+macOS：
+
+```bash
+cargo build -p airpaste-tray            # 托盘 GUI（内嵌 agent）
+cargo build -p airpaste-server -p airpaste-agent   # CLI 服务器 + agent
+```
+
+Windows（首次运行会安装 Rust，并在 `tools/winlibs` 下下载便携版 WinLibs MinGW 工具链；网络可直连时省略 `-Proxy`）：
+
+```powershell
+.\scripts\setup-windows-toolchain.ps1 -Proxy "http://127.0.0.1:7897"
+$env:PATH = "$(Get-Location)\tools\winlibs\mingw64\bin;$env:PATH"
+cargo +stable-x86_64-pc-windows-gnu build -p airpaste-tray -p airpaste-server -p airpaste-agent
+```
+
+## 设计目标
 
 - 服务器作为控制平面；
 - 局域网 / 点对点直连作为首选数据平面；
@@ -13,39 +65,31 @@ Air Paste 是一个基于 Rust 的 Windows / macOS 共享剪贴板工具。
 - 加密文本历史作为可选的便利功能；
 - 使用显式的远程粘贴快捷键，保证 MVP 阶段文件粘贴的可靠性。
 
-入门文档：
+文档：
 
-- [docs/USER_MANUAL.md](docs/USER_MANUAL.md)
+- [docs/USER_MANUAL.md](docs/USER_MANUAL.md) —— 完整使用说明书
 - [docs/DESIGN.md](docs/DESIGN.md)
 - [docs/SESSION_HANDOFF.md](docs/SESSION_HANDOFF.md)
 - [docs/MACOS_AGENT_PLAN.md](docs/MACOS_AGENT_PLAN.md)
 
-推荐的首批实现步骤：
-
-1. 按 `docs/DESIGN.md` 中的描述创建 Rust workspace 目录结构。
-2. 实现共享的协议 / 领域类型。
-3. 搭建服务器健康检查与 WebSocket 骨架。
-4. 搭建 agent 配置与启动骨架。
-
-## 当前 MVP 服务器
-
-仓库目前包含一个可运行的 Rust 控制平面服务器：
+## Workspace 结构
 
 - `crates/airpaste-core`：共享领域类型。
 - `crates/airpaste-protocol`：REST 与 WebSocket DTO。
 - `crates/airpaste-crypto`：端到端内容加密（X25519 + XChaCha20-Poly1305）。
 - `crates/airpaste-server`：内嵌 `redb` 存储的 Axum 服务器。
-- `crates/airpaste-agent`：支持文本同步与文件清单发布的 Windows agent MVP。
+- `crates/airpaste-agent`：负责文本同步与文件清单发布的 CLI agent。
+- `crates/airpaste-tray`：内嵌 agent 的跨平台托盘 GUI。
 
-运行方式：
+## CLI 服务器与 agent（进阶 / 无界面部署）
+
+托盘应用本身就能代跑服务器；只有无界面或脚本化部署才需要直接运行下面的命令。
+
+运行服务器：
 
 ```powershell
-.\scripts\setup-windows-toolchain.ps1 -Proxy "http://127.0.0.1:7897"
-$env:PATH = "D:\ep\air-paste\tools\winlibs\mingw64\bin;$env:PATH"
 cargo +stable-x86_64-pc-windows-gnu run -p airpaste-server -- --bind 0.0.0.0:14444 --db .\airpaste.redb
 ```
-
-安装脚本会安装 Rust，并在 `tools/winlibs` 下下载便携版 WinLibs MinGW 工具链用于 Windows 链接。如果网络可以直连，可省略 `-Proxy` 参数。
 
 如果是 DDNS / 私有部署，启动服务器时加上 `--auth-token <secret>` 或设置 `AIRPASTE_AUTH_TOKEN=<secret>`。健康检查保持公开；其余所有 REST 和 WebSocket API 都要求 `Authorization: Bearer <secret>`。Agent 端用 `--auth-token <secret>` 传入同一个值。
 
@@ -65,13 +109,6 @@ cargo +stable-x86_64-pc-windows-gnu run -p airpaste-server -- --bind 0.0.0.0:144
 - `POST /v1/relay/sessions`
 - `GET /v1/relay/{session_id}/ws`
 - `GET /v1/ws`
-
-同时构建两个二进制：
-
-```powershell
-$env:PATH = "D:\ep\air-paste\tools\winlibs\mingw64\bin;$env:PATH"
-cargo +stable-x86_64-pc-windows-gnu build -p airpaste-server -p airpaste-agent
-```
 
 让 agent 连接本地服务器运行：
 
@@ -109,7 +146,7 @@ cargo +stable-x86_64-pc-windows-gnu build -p airpaste-server -p airpaste-agent
 - `--apply-latest-files-once` 一次性下载最新的远程文件剪贴内容，把下载的文件引用写入本地剪贴板，以 JSON 形式打印下载路径后退出。便于 macOS 快捷键 / 剪贴板调试。
 - `--auto-paste-files=true` 会在自动应用文件后向当前前台应用发送 `Ctrl+V`，除非接收方有意聚焦在目标应用上，否则请保持关闭。
 
-冒烟测试：
+## 冒烟测试
 
 ```powershell
 .\scripts\smoke-agent.ps1

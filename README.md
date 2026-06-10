@@ -2,9 +2,61 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Air Paste is a Rust-based shared clipboard for Windows and macOS.
+Air Paste is a Rust-based shared clipboard for Windows and macOS: copy text or files on device A, press a hotkey on device B, and it pastes there. Text is end-to-end encrypted; files transfer peer-to-peer on the LAN (with an encrypted server relay as fallback), and the server never stores file contents.
 
-The design goal is:
+## How it works in daily use
+
+Run the tray app (`airpaste-tray`, menu bar on macOS / system tray on Windows) on every device. Then:
+
+- **Send**: copy something normally (`Cmd+C` / `Ctrl+C`), then press **`Option+C`** (macOS) / **`Alt+C`** (Windows) to publish it to your other devices.
+- **Receive**: focus the target app and press **`Option+V`** / **`Alt+V`** — the latest text is pasted, or the latest pending files are downloaded and pasted.
+- No hotkeys needed if you prefer the window: type text and click **Send**, drag files into the window to send, click **Copy**/**Download** on inbox items to receive.
+
+## Quick start (GUI only, no command line)
+
+You need two devices, A and B. A also acts as the server.
+
+Build and launch the tray app on each device (prebuilt installers are not provided yet):
+
+```bash
+# macOS
+scripts/bundle-macos.sh && open dist/AirPaste.app
+```
+
+```powershell
+# Windows (set up the toolchain first, see "Building" below)
+cargo +stable-x86_64-pc-windows-gnu run -p airpaste-tray
+```
+
+Then, all in the tray window:
+
+1. **On A**: open the settings panel, keep the default server URL `http://127.0.0.1:14444`, check **“Run server on this device”**, click **Save & Connect**. As the first device it is trusted automatically → `● Connected`.
+2. **On A**: click **“Generate pair code”** and note the 6-digit code.
+3. **On B**: enter A's LAN address (`http://<A's IP>:14444`) as the server URL, paste the pair code, click **Save & Connect** → `● Connected`.
+4. Copy on one device, press `Option+C` / `Alt+C` to send; press `Option+V` / `Alt+V` on the other to paste. Done.
+
+> macOS: grant Accessibility permission (System Settings → Privacy & Security → Accessibility) to the tray app, otherwise the paste hotkey cannot type into other apps. Check **“Launch at login”** on each device if you want it to start automatically.
+
+The full walkthrough — CLI usage, pairing details, auth tokens, troubleshooting — is in [docs/USER_MANUAL.md](docs/USER_MANUAL.md) (Chinese).
+
+## Building
+
+macOS:
+
+```bash
+cargo build -p airpaste-tray            # tray GUI (embedded agent)
+cargo build -p airpaste-server -p airpaste-agent   # CLI server + agent
+```
+
+Windows (first time, installs Rust + a portable WinLibs MinGW toolchain under `tools/winlibs`; omit `-Proxy` if direct network access works):
+
+```powershell
+.\scripts\setup-windows-toolchain.ps1 -Proxy "http://127.0.0.1:7897"
+$env:PATH = "$(Get-Location)\tools\winlibs\mingw64\bin;$env:PATH"
+cargo +stable-x86_64-pc-windows-gnu build -p airpaste-tray -p airpaste-server -p airpaste-agent
+```
+
+## Design goals
 
 - server as control plane;
 - LAN/direct peer transfer as the preferred data plane;
@@ -13,39 +65,31 @@ The design goal is:
 - encrypted text history as an opt-in convenience;
 - explicit remote paste hotkey for reliable MVP file paste.
 
-Start here:
+Documentation:
 
-- [docs/USER_MANUAL.md](docs/USER_MANUAL.md)
+- [docs/USER_MANUAL.md](docs/USER_MANUAL.md) — full user manual (Chinese)
 - [docs/DESIGN.md](docs/DESIGN.md)
 - [docs/SESSION_HANDOFF.md](docs/SESSION_HANDOFF.md)
 - [docs/MACOS_AGENT_PLAN.md](docs/MACOS_AGENT_PLAN.md)
 
-Recommended first implementation step:
-
-1. Create the Rust workspace layout described in `docs/DESIGN.md`.
-2. Implement shared protocol/domain types.
-3. Build the server health check and WebSocket skeleton.
-4. Build the agent config and startup skeleton.
-
-## Current MVP Server
-
-The repository currently includes a runnable Rust control-plane server:
+## Workspace layout
 
 - `crates/airpaste-core`: shared domain types.
 - `crates/airpaste-protocol`: REST and WebSocket DTOs.
 - `crates/airpaste-crypto`: end-to-end content encryption (X25519 + XChaCha20-Poly1305).
 - `crates/airpaste-server`: Axum server with embedded `redb` storage.
-- `crates/airpaste-agent`: Windows agent MVP for text sync and file manifest publishing.
+- `crates/airpaste-agent`: CLI agent for text sync and file manifest publishing.
+- `crates/airpaste-tray`: cross-platform tray GUI embedding the agent.
 
-Run it with:
+## CLI server and agent (advanced / headless)
+
+The tray app can host the server for you; run these directly only for headless or scripted setups.
+
+Run the server:
 
 ```powershell
-.\scripts\setup-windows-toolchain.ps1 -Proxy "http://127.0.0.1:7897"
-$env:PATH = "D:\ep\air-paste\tools\winlibs\mingw64\bin;$env:PATH"
 cargo +stable-x86_64-pc-windows-gnu run -p airpaste-server -- --bind 0.0.0.0:14444 --db .\airpaste.redb
 ```
-
-The setup script installs Rust and downloads a portable WinLibs MinGW toolchain under `tools/winlibs` for linking on Windows. Omit `-Proxy` when direct network access works.
 
 For a DDNS/private deployment, start the server with `--auth-token <secret>` or `AIRPASTE_AUTH_TOKEN=<secret>`. Health checks stay public; all other REST and WebSocket APIs require `Authorization: Bearer <secret>`. Agents use the same value with `--auth-token <secret>`.
 
@@ -66,20 +110,13 @@ Useful endpoints:
 - `GET /v1/relay/{session_id}/ws`
 - `GET /v1/ws`
 
-Build both binaries with:
-
-```powershell
-$env:PATH = "D:\ep\air-paste\tools\winlibs\mingw64\bin;$env:PATH"
-cargo +stable-x86_64-pc-windows-gnu build -p airpaste-server -p airpaste-agent
-```
-
 Run the agent against a local server:
 
 ```powershell
 .\target\debug\airpaste-agent.exe --server-url http://127.0.0.1:14444 --state-path .\.airpaste-agent-a.json --device-name "PC A" --auth-token "<secret-if-server-enabled-it>"
 ```
 
-To join a non-first device, create a pairing code through `POST /v1/pair/start` from an already trusted device, then start the new agent with `--pair-code <code>`. Alternatively, an already trusted device can approve a registered device directly — the 信任 button next to an untrusted device in the tray's 设备 tab, or `--trust-device <device-id>` from the CLI. The first registered device in a fresh database is trusted automatically for bootstrap.
+To join a non-first device, create a pairing code through `POST /v1/pair/start` from an already trusted device, then start the new agent with `--pair-code <code>`. Alternatively, an already trusted device can approve a registered device directly — the trust button next to an untrusted device in the tray's devices tab, or `--trust-device <device-id>` from the CLI. The first registered device in a fresh database is trusted automatically for bootstrap.
 
 Current agent scope:
 
@@ -109,7 +146,7 @@ File transfer MVP notes:
 - `--apply-latest-files-once` downloads the latest remote file clip once, writes the downloaded file references to the local clipboard, prints the downloaded paths as JSON, and exits. This is useful for macOS hotkey/pasteboard debugging.
 - `--auto-paste-files=true` sends `Ctrl+V` to the current foreground app after an automatic file apply, so keep it disabled unless the receiver is intentionally focused on the target app.
 
-Smoke test:
+## Smoke tests
 
 ```powershell
 .\scripts\smoke-agent.ps1
