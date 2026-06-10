@@ -1,5 +1,7 @@
 # Air Paste
 
+English | [简体中文](README.zh-CN.md)
+
 Air Paste is a Rust-based shared clipboard for Windows and macOS.
 
 The design goal is:
