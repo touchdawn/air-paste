@@ -196,6 +196,23 @@ impl Args {
         self.state_path.clone().unwrap_or_else(default_state_path)
     }
 
+    /// Older builds defaulted the state file to `./.airpaste-agent.json` in the current
+    /// working directory (still the fallback on platforms without a per-user dir). When the
+    /// per-user default is in effect but the file does not exist yet and a legacy CWD file
+    /// does, return the legacy path so the caller can hint at migration instead of silently
+    /// minting a fresh device identity.
+    pub fn legacy_state_path_hint(&self) -> Option<PathBuf> {
+        if self.state_path.is_some() {
+            return None;
+        }
+        let resolved = default_state_path();
+        let legacy = PathBuf::from(".airpaste-agent.json");
+        if resolved == legacy || resolved.exists() || !legacy.exists() {
+            return None;
+        }
+        Some(legacy)
+    }
+
     pub fn cache_dir(&self) -> PathBuf {
         self.cache_dir.clone().unwrap_or_else(default_cache_dir)
     }
@@ -219,18 +236,9 @@ fn default_device_name() -> String {
 }
 
 fn default_state_path() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = home_dir() {
-            return home
-                .join("Library")
-                .join("Application Support")
-                .join("AirPaste")
-                .join("agent.json");
-        }
-    }
-
-    PathBuf::from(".airpaste-agent.json")
+    platform_app_support_dir()
+        .map(|dir| dir.join("agent.json"))
+        .unwrap_or_else(|| PathBuf::from(".airpaste-agent.json"))
 }
 
 fn default_cache_dir() -> PathBuf {
@@ -238,6 +246,17 @@ fn default_cache_dir() -> PathBuf {
     {
         if let Some(home) = home_dir() {
             return home.join("Library").join("Caches").join("AirPaste");
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // %LOCALAPPDATA% is the conventional home for caches; fall back to the roaming
+        // profile if it is unset.
+        for var in ["LOCALAPPDATA", "APPDATA"] {
+            if let Some(base) = std::env::var_os(var).filter(|value| !value.is_empty()) {
+                return PathBuf::from(base).join("AirPaste").join("cache");
+            }
         }
     }
 
@@ -251,25 +270,31 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Per-user AirPaste directory for embedder config (the tray): `~/Library/Application
-/// Support/AirPaste` (macOS), `%APPDATA%\AirPaste` (Windows), else the current directory.
-pub fn app_support_dir() -> PathBuf {
+/// Per-user AirPaste directory: `~/Library/Application Support/AirPaste` (macOS),
+/// `%APPDATA%\AirPaste` (Windows), `None` elsewhere or when the base env var is unset.
+fn platform_app_support_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
-            return PathBuf::from(home)
-                .join("Library")
+        return home_dir().map(|home| {
+            home.join("Library")
                 .join("Application Support")
-                .join("AirPaste");
-        }
+                .join("AirPaste")
+        });
     }
 
     #[cfg(windows)]
     {
-        if let Some(appdata) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
-            return PathBuf::from(appdata).join("AirPaste");
-        }
+        return std::env::var_os("APPDATA")
+            .filter(|value| !value.is_empty())
+            .map(|appdata| PathBuf::from(appdata).join("AirPaste"));
     }
 
-    PathBuf::from(".")
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Per-user AirPaste directory for embedder config (the tray): `~/Library/Application
+/// Support/AirPaste` (macOS), `%APPDATA%\AirPaste` (Windows), else the current directory.
+pub fn app_support_dir() -> PathBuf {
+    platform_app_support_dir().unwrap_or_else(|| PathBuf::from("."))
 }

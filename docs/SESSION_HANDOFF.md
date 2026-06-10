@@ -288,7 +288,7 @@ The agent:
 - Fallback is incremental: files already downloaded over the direct path are not re-pulled over the relay (the relay only requests still-missing indexes), and source grants are committed only after a file finishes streaming, so a transfer that fails partway can be completed over the relay instead of failing with `410 already served`.
 - `poll_clipboard` logs and skips transient local clipboard read failures instead of exiting, so a momentary OS clipboard error does not kill the agent.
 - Reconnects the control websocket with exponential backoff (2s up to 30s) and a 10s connect timeout, so a network drop or change does not busy-reconnect or hang. Relay connects also time out (10s); relay receives time out (recipient 30s, source idle 60s).
-- Uses macOS defaults `~/Library/Application Support/AirPaste/agent.json` for state and `~/Library/Caches/AirPaste` for cache when paths are not explicitly provided.
+- Uses per-user default paths when not explicitly provided: macOS `~/Library/Application Support/AirPaste/agent.json` for state and `~/Library/Caches/AirPaste` for cache; Windows `%APPDATA%\AirPaste\agent.json` for state and `%LOCALAPPDATA%\AirPaste\cache` for cache (falls back to `%APPDATA%` if `%LOCALAPPDATA%` is unset). Earlier builds defaulted the Windows state file to `./.airpaste-agent.json` in the CWD, which minted a fresh device identity per launch directory; if the per-user default is missing but a legacy CWD file exists, the agent logs a migration hint (it never moves the file itself).
 
 Useful agent flags:
 

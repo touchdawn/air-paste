@@ -689,6 +689,15 @@ pub fn spawn_embedded(args: Args) -> AgentHandle {
 
 async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     let state_path = args.state_path();
+    if let Some(legacy) = args.legacy_state_path_hint() {
+        tracing::warn!(
+            legacy = %legacy.display(),
+            state = %state_path.display(),
+            "found a legacy state file in the working directory but the default state path is \
+             now per-user; a fresh device identity will be created. To keep the old identity, \
+             move the legacy file to the new path or pass --state-path / AIRPASTE_STATE"
+        );
+    }
     let device_name = args.device_name();
     let cache_dir = args.cache_dir();
     let state_file = StateFile::new(state_path);

@@ -111,10 +111,12 @@ agent 第一次运行时会生成：
 
 - macOS 状态文件：`~/Library/Application Support/AirPaste/agent.json`
 - macOS 缓存目录：`~/Library/Caches/AirPaste`
-- Windows 状态文件：当前工作目录下的 `.airpaste-agent.json`
-- Windows 缓存目录：当前工作目录下的 `.airpaste-cache`
+- Windows 状态文件：`%APPDATA%\AirPaste\agent.json`
+- Windows 缓存目录：`%LOCALAPPDATA%\AirPaste\cache`（若 `%LOCALAPPDATA%` 未设置则退回 `%APPDATA%\AirPaste\cache`）
 
-Windows 默认路径依赖启动时所在目录。实际使用时建议显式传入 `--state-path` 和 `--cache-dir`，避免从不同目录启动时生成多个设备身份。
+仍然可以用 `--state-path` / `AIRPASTE_STATE` 和 `--cache-dir` / `AIRPASTE_CACHE_DIR` 显式覆盖默认路径。
+
+> 旧版本在 Windows 上默认把状态文件写到启动目录下的 `.airpaste-agent.json`，从不同目录启动会生成多个设备身份。如果新默认路径还不存在、而启动目录里有旧的 `.airpaste-agent.json`，agent 会在日志里提示迁移（不会自动移动文件）；把旧文件移动到 `%APPDATA%\AirPaste\agent.json` 即可保留原设备身份。
 
 ## 4. 最小可用流程
 
@@ -370,8 +372,6 @@ target/x86_64-pc-windows-gnu/debug/airpaste-server.exe
   --server-url http://<server-host>:8080 `
   --device-name "Windows PC" `
   --auth-token "<secret-if-enabled>" `
-  --state-path .\.airpaste-agent.json `
-  --cache-dir .\.airpaste-cache `
   --peer-bind 0.0.0.0:17390 `
   --peer-public-url http://<this-windows-lan-ip>:17390
 ```
@@ -388,7 +388,6 @@ Windows 防火墙如果提示是否允许网络访问，请允许本机 peer 端
 .\target\debug\airpaste-agent.exe `
   --server-url http://<server-host>:8080 `
   --auth-token "<secret-if-enabled>" `
-  --state-path .\.airpaste-agent.json `
   --create-pair-code `
   --pair-ttl-seconds 600 `
   --publish-clipboard=false `
@@ -404,8 +403,6 @@ Windows 防火墙如果提示是否允许网络访问，请允许本机 peer 端
   --device-name "Workstation" `
   --auth-token "<secret-if-enabled>" `
   --pair-code "<code>" `
-  --state-path .\.airpaste-agent.json `
-  --cache-dir .\.airpaste-cache `
   --peer-bind 0.0.0.0:17390 `
   --peer-public-url http://<this-windows-lan-ip>:17390
 ```
