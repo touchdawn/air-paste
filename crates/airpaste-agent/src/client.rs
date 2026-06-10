@@ -7,9 +7,9 @@ use airpaste_protocol::{
     rest_body_sha256_base64url, ConfirmPairingRequest, ConfirmPairingResponse, CreateClipRequest,
     CreateClipResponse, CreateRelaySessionRequest, CreateRelaySessionResponse,
     RegisterDeviceRequest, RegisterDeviceResponse, StartPairingRequest, StartPairingResponse,
-    AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER, AIRPASTE_NONCE_HEADER,
-    AIRPASTE_REST_SIGNATURE_ALG, AIRPASTE_SIGNATURE_ALG_HEADER, AIRPASTE_SIGNATURE_HEADER,
-    AIRPASTE_TIMESTAMP_HEADER,
+    TrustDeviceResponse, AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER,
+    AIRPASTE_NONCE_HEADER, AIRPASTE_REST_SIGNATURE_ALG, AIRPASTE_SIGNATURE_ALG_HEADER,
+    AIRPASTE_SIGNATURE_HEADER, AIRPASTE_TIMESTAMP_HEADER,
 };
 use anyhow::Context;
 use chrono::Utc;
@@ -157,6 +157,24 @@ impl ServerClient {
             .json::<ConfirmPairingResponse>()
             .await
             .context("failed to decode confirm pairing response")?;
+        Ok(response.device)
+    }
+
+    /// Trust a registered device directly (this device must already be trusted).
+    pub async fn trust_device(&self, device_id: &DeviceId) -> anyhow::Result<Device> {
+        let response = self
+            .signed_json(
+                "POST",
+                &format!("/v1/devices/{}/trust", device_id.as_str()),
+                &serde_json::json!({}),
+            )
+            .await?
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<TrustDeviceResponse>()
+            .await
+            .context("failed to decode trust device response")?;
         Ok(response.device)
     }
 

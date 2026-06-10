@@ -108,6 +108,11 @@ pub struct ConfirmPairingResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrustDeviceResponse {
+    pub device: Device,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateClipRequest {
     pub source_device_id: DeviceId,
     pub expires_at: Option<Timestamp>,

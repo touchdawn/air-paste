@@ -9,9 +9,10 @@ use airpaste_protocol::{
     rest_body_sha256_base64url, rest_signing_message, ClipSummary, ConfirmPairingRequest,
     ConfirmPairingResponse, CreateClipRequest, CreateClipResponse, CreateRelaySessionRequest,
     CreateRelaySessionResponse, HealthResponse, RegisterDeviceRequest, RegisterDeviceResponse,
-    ServerEvent, StartPairingRequest, StartPairingResponse, AIRPASTE_BODY_SHA256_HEADER,
-    AIRPASTE_DEVICE_ID_HEADER, AIRPASTE_NONCE_HEADER, AIRPASTE_REST_SIGNATURE_ALG,
-    AIRPASTE_SIGNATURE_ALG_HEADER, AIRPASTE_SIGNATURE_HEADER, AIRPASTE_TIMESTAMP_HEADER,
+    ServerEvent, StartPairingRequest, StartPairingResponse, TrustDeviceResponse,
+    AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER, AIRPASTE_NONCE_HEADER,
+    AIRPASTE_REST_SIGNATURE_ALG, AIRPASTE_SIGNATURE_ALG_HEADER, AIRPASTE_SIGNATURE_HEADER,
+    AIRPASTE_TIMESTAMP_HEADER,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -36,6 +37,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/v1/health", get(health))
         .route("/v1/devices", get(list_devices).post(register_device))
+        .route("/v1/devices/:device_id/trust", post(trust_device))
         .route("/v1/pair/start", post(start_pairing))
         .route("/v1/pair/confirm", post(confirm_pairing))
         .route("/v1/clips", post(create_clip))
@@ -77,6 +79,28 @@ async fn list_devices(
     TrustedDevice(_request_device): TrustedDevice,
 ) -> ApiResult<Json<Vec<airpaste_core::Device>>> {
     Ok(Json(state.store.list_devices().map_err(ApiError::from)?))
+}
+
+/// Trust a registered device directly, approved by an already-trusted device — the in-app
+/// alternative to the pairing-code dance. The approver must be trusted (`TrustedDevice`), which
+/// gives this the same authority as minting a pairing code.
+async fn trust_device(
+    State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
+    Path(device_id): Path<String>,
+) -> ApiResult<Json<TrustDeviceResponse>> {
+    let device_id = DeviceId::from(device_id);
+    let device = state
+        .store
+        .trust_device(&device_id)
+        .map_err(|error| match error {
+            StoreError::NotFound => ApiError::not_found("device not found"),
+            other => ApiError::from(other),
+        })?;
+    state.hub.broadcast(ServerEvent::DeviceOnline {
+        device_id: device.device_id.clone(),
+    });
+    Ok(Json(TrustDeviceResponse { device }))
 }
 
 async fn start_pairing(

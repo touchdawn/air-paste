@@ -54,6 +54,7 @@ Useful endpoints:
 - `GET /health`
 - `POST /v1/devices`
 - `GET /v1/devices`
+- `POST /v1/devices/{device_id}/trust`
 - `POST /v1/pair/start`
 - `POST /v1/pair/confirm`
 - `POST /v1/clips`
@@ -76,7 +77,7 @@ Run the agent against a local server:
 .\target\debug\airpaste-agent.exe --server-url http://127.0.0.1:14444 --state-path .\.airpaste-agent-a.json --device-name "PC A" --auth-token "<secret-if-server-enabled-it>"
 ```
 
-To join a non-first device, create a pairing code through `POST /v1/pair/start` from an already trusted device, then start the new agent with `--pair-code <code>`. The first registered device in a fresh database is trusted automatically for bootstrap.
+To join a non-first device, create a pairing code through `POST /v1/pair/start` from an already trusted device, then start the new agent with `--pair-code <code>`. Alternatively, an already trusted device can approve a registered device directly — the 信任 button next to an untrusted device in the tray's 设备 tab, or `--trust-device <device-id>` from the CLI. The first registered device in a fresh database is trusted automatically for bootstrap.
 
 Current agent scope:
 

@@ -34,11 +34,24 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
                 }
                 if !device.trusted {
                     badge(ui, "未信任", theme::WARNING);
+                    if ui
+                        .small_button("信任")
+                        .on_hover_text("允许该设备加入同步(等效于配对成功)")
+                        .clicked()
+                    {
+                        app.agent.trust_device(device.device_id.clone());
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     hint(ui, &last_seen_text(device));
                 });
             });
+        }
+    }
+    if let Some(result) = app.agent.trust_status() {
+        match result {
+            Ok(message) => status_line(ui, theme::SUCCESS, &message),
+            Err(error) => status_line(ui, theme::DANGER, &format!("信任失败:{}", preview(&error))),
         }
     }
 

@@ -36,6 +36,10 @@ pub struct Args {
     #[arg(long, env = "AIRPASTE_PAIR_TTL_SECONDS")]
     pub pair_ttl_seconds: Option<i64>,
 
+    /// Trust a registered device by id and exit (this device must already be trusted).
+    #[arg(long, env = "AIRPASTE_TRUST_DEVICE")]
+    pub trust_device: Option<String>,
+
     #[arg(long, env = "AIRPASTE_PRINT_LATEST_CLIP", default_value_t = false)]
     pub print_latest_clip: bool,
 

@@ -266,6 +266,8 @@ pub struct AgentShared {
     client: std::sync::Mutex<Option<(ServerClient, DeviceId)>>,
     // Latest UI-requested pair code: Ok(code) / Ok("生成中…") / Err(reason).
     pair_code: std::sync::Mutex<Option<Result<String, String>>>,
+    // Outcome of the latest UI-initiated device trust: Ok(progress/done message) / Err(reason).
+    trust_status: std::sync::Mutex<Option<Result<String, String>>>,
     // Snapshot of the server's device registry for the UI, refreshed by a background poll while
     // connected. Empty until this device is trusted enough to list devices.
     devices: std::sync::Mutex<Vec<DeviceInfo>>,
@@ -301,6 +303,7 @@ impl AgentShared {
             runtime: tokio::runtime::Handle::current(),
             client: std::sync::Mutex::new(None),
             pair_code: std::sync::Mutex::new(None),
+            trust_status: std::sync::Mutex::new(None),
             devices: std::sync::Mutex::new(Vec::new()),
             send_text: std::sync::Mutex::new(None),
             send_files: std::sync::Mutex::new(None),
@@ -420,6 +423,36 @@ impl AgentHandle {
     /// The latest pair code the UI requested: `Ok(code)` (or "生成中…") / `Err(reason)`.
     pub fn pair_code(&self) -> Option<Result<String, String>> {
         self.shared.pair_code.lock().unwrap().clone()
+    }
+
+    /// Trust a registered device directly (this device must be trusted) — the in-app
+    /// alternative to passing a pairing code to the other device. Non-blocking: the outcome
+    /// lands in `trust_status()`; the device list refresh picks up the new trust state.
+    pub fn trust_device(&self, device_id: String) {
+        let snapshot = self.shared.client.lock().unwrap().clone();
+        let Some((client, _)) = snapshot else {
+            *self.shared.trust_status.lock().unwrap() = Some(Err("尚未连接".to_string()));
+            return;
+        };
+        *self.shared.trust_status.lock().unwrap() = Some(Ok("信任中…".to_string()));
+        let shared = self.shared.clone();
+        self.shared.runtime.spawn(async move {
+            let entry = match client.trust_device(&DeviceId::from(device_id)).await {
+                Ok(device) => Ok(format!("已信任 {}", device.name)),
+                Err(error) => Err(format!("{error:#}")),
+            };
+            *shared.trust_status.lock().unwrap() = Some(entry);
+        });
+    }
+
+    /// Outcome of the latest `trust_device` call: `Ok(message)` / `Err(reason)`.
+    pub fn trust_status(&self) -> Option<Result<String, String>> {
+        self.shared.trust_status.lock().unwrap().clone()
+    }
+
+    /// Dismiss the displayed trust outcome.
+    pub fn clear_trust_status(&self) {
+        *self.shared.trust_status.lock().unwrap() = None;
     }
 
     /// Dismiss the displayed pair code.
@@ -775,6 +808,19 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
             .await
             .context("failed to start pairing")?;
         println!("{}", serde_json::to_string(&response)?);
+        return Ok(());
+    }
+    if let Some(target) = args
+        .trust_device
+        .clone()
+        .map(|target| target.trim().to_string())
+        .filter(|target| !target.is_empty())
+    {
+        let device = client
+            .trust_device(&DeviceId::from(target))
+            .await
+            .context("failed to trust device")?;
+        println!("{}", serde_json::to_string(&device)?);
         return Ok(());
     }
     if args.print_latest_clip {
