@@ -18,7 +18,16 @@ repository = "https://example.invalid/air-paste"
 anyhow = "1"
 arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 axum = { version = "0.7", features = ["ws"] }
-eframe = "0.34"
+# Default features minus the wgpu backend (0.34 made wgpu the default): we stick with the
+# glow/OpenGL backend — it's what 0.29 used, and wgpu-hal v29 fails to build against the
+# `windows` crate bindings under the x86_64-pc-windows-gnu toolchain this project ships with.
+eframe = { version = "0.34", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
 tray-icon = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
 bytes = "1"
