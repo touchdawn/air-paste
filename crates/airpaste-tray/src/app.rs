@@ -452,18 +452,15 @@ impl eframe::App for TrayApp {
         // Driven from `logic` so it appears even while the main window is hidden.
         ui::toast::update(self, ctx);
 
-        // A plain window close (red button / X) keeps the app alive in the tray; only the
-        // tray's Quit truly exits. On Windows the window is minimized, NOT hidden: it keeps
-        // its taskbar button so it stays findable via the taskbar and Alt-Tab (see
-        // `platform::apply_tray_window_policy`). macOS hides — the menu-bar icon is the
-        // persistent presence there.
+        // A plain window close (red button / X) hides the window — the app keeps living in
+        // the tray, and the tray menu's Show brings it back; only the tray's Quit truly
+        // exits. Hiding (rather than minimizing) is safe again on Windows: eframe 0.29 spun
+        // a full core on hidden windows with the update loop stopped (the close→minimize
+        // workaround in 31b5882), but 0.34 handles invisible windows properly
+        // (emilk/egui#7905, #7950) — measured ~0% CPU with `logic` still ticking.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if cfg!(windows) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
         // Native paste chord (Cmd+V): drained every tick so a paste on another tab cannot
