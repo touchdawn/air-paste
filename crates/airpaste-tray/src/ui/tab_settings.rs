@@ -43,6 +43,35 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
                 .hint_text("可选"),
         );
     });
+    form_row(ui, "发送热键", |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut app.hotkey_copy_input)
+                .desired_width(f32::INFINITY)
+                .hint_text(format!(
+                    "留空使用默认:{}",
+                    airpaste_agent::HotkeySpec::parse(airpaste_agent::DEFAULT_COPY_HOTKEY)
+                        .map(|s| s.label())
+                        .unwrap_or_default()
+                )),
+        )
+        .on_hover_text(
+            "把当前剪贴板发送到 AirPaste 的全局热键。格式如 alt+c、ctrl+shift+f9,\
+             修饰键可用 alt/option、ctrl、shift、cmd/win。保存并连接后生效。",
+        );
+    });
+    form_row(ui, "粘贴热键", |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut app.hotkey_paste_input)
+                .desired_width(f32::INFINITY)
+                .hint_text(format!(
+                    "留空使用默认:{}",
+                    airpaste_agent::HotkeySpec::parse(airpaste_agent::DEFAULT_PASTE_HOTKEY)
+                        .map(|s| s.label())
+                        .unwrap_or_default()
+                )),
+        )
+        .on_hover_text("从 AirPaste 粘贴远端内容的全局热键,格式同上。保存并连接后生效。");
+    });
     form_row(ui, "简单设备令牌", |ui| {
         ui.add(
             egui::TextEdit::singleline(&mut app.simple_token_input)
@@ -124,10 +153,15 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
 
     hairline(ui);
 
+    let hotkey_error = app.hotkey_inputs_error();
+    if let Some(error) = &hotkey_error {
+        status_line(ui, theme::DANGER, error);
+    }
+
     ui.horizontal(|ui| {
         hint(ui, "保存后会重启应用以使用新配置");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can_save = !app.server_url_input.trim().is_empty();
+            let can_save = !app.server_url_input.trim().is_empty() && hotkey_error.is_none();
             if primary_button(ui, can_save, "保存并连接").clicked() {
                 app.save_and_reconnect();
             }

@@ -52,6 +52,12 @@ pub fn run() -> eframe::Result<()> {
     if args.device_name.is_none() {
         args.device_name = config.device_name.clone().filter(|n| !n.trim().is_empty());
     }
+    if args.hotkey_copy.is_none() {
+        args.hotkey_copy = config.hotkey_copy.clone().filter(|h| !h.trim().is_empty());
+    }
+    if args.hotkey_paste.is_none() {
+        args.hotkey_paste = config.hotkey_paste.clone().filter(|h| !h.trim().is_empty());
+    }
     // An explicit --simple-mirror=true (or env) wins; otherwise the saved checkbox applies.
     args.simple_mirror = args.simple_mirror || config.simple_mirror;
 
@@ -62,6 +68,8 @@ pub fn run() -> eframe::Result<()> {
         auth_token: args.auth_token.clone().unwrap_or_default(),
         pair_code: args.pair_code.clone().unwrap_or_default(),
         device_name: args.device_name.clone().unwrap_or_default(),
+        hotkey_copy: args.hotkey_copy.clone().unwrap_or_default(),
+        hotkey_paste: args.hotkey_paste.clone().unwrap_or_default(),
         simple_token: config.simple_token.clone().unwrap_or_default(),
         simple_mirror: args.simple_mirror,
     };
@@ -127,6 +135,8 @@ struct Settings {
     auth_token: String,
     pair_code: String,
     device_name: String,
+    hotkey_copy: String,
+    hotkey_paste: String,
     simple_token: String,
     simple_mirror: bool,
 }
@@ -148,6 +158,9 @@ pub(crate) struct TrayApp {
     pub(crate) pair_code_input: String,
     // Custom device name; empty means "use the platform default".
     pub(crate) device_name_input: String,
+    // Custom hotkey chords; empty means "use the defaults" (Alt+C / Alt+V).
+    pub(crate) hotkey_copy_input: String,
+    pub(crate) hotkey_paste_input: String,
     // Simple-device access (e.g. iPhone Shortcuts): embedded-server token + mirror toggle.
     // Both apply on save-and-relaunch like the connection settings.
     pub(crate) simple_token_input: String,
@@ -247,6 +260,8 @@ impl TrayApp {
             auth_token_input: settings.auth_token,
             pair_code_input: settings.pair_code,
             device_name_input: settings.device_name,
+            hotkey_copy_input: settings.hotkey_copy,
+            hotkey_paste_input: settings.hotkey_paste,
             simple_token_input: settings.simple_token,
             simple_mirror_input: settings.simple_mirror,
             pair_code_cleared: false,
@@ -306,6 +321,27 @@ impl TrayApp {
         }
     }
 
+    /// Validate the hotkey inputs (empty = default chord); `Err` holds a user-facing message.
+    /// The same parse runs in the agent at startup — this just fails before the relaunch.
+    pub(crate) fn hotkey_inputs_error(&self) -> Option<String> {
+        let parse = |input: &str, default: &str| {
+            let input = input.trim();
+            airpaste_agent::HotkeySpec::parse(if input.is_empty() { default } else { input })
+        };
+        let copy = match parse(&self.hotkey_copy_input, airpaste_agent::DEFAULT_COPY_HOTKEY) {
+            Ok(spec) => spec,
+            Err(error) => return Some(format!("发送热键无效:{error}")),
+        };
+        let paste = match parse(&self.hotkey_paste_input, airpaste_agent::DEFAULT_PASTE_HOTKEY) {
+            Ok(spec) => spec,
+            Err(error) => return Some(format!("粘贴热键无效:{error}")),
+        };
+        if copy == paste {
+            return Some(format!("发送和粘贴热键不能相同({})", copy.label()));
+        }
+        None
+    }
+
     /// Persist the entered connection settings and relaunch so the embedded agent connects with
     /// them. We re-exec the process (rather than restart the agent in place) so the OS reclaims
     /// the agent's bound peer port, global hotkeys, and mDNS registration — no leaked tasks.
@@ -323,6 +359,10 @@ impl TrayApp {
             Some(self.pair_code_input.trim().to_string()).filter(|c: &String| !c.is_empty());
         config.device_name =
             Some(self.device_name_input.trim().to_string()).filter(|n: &String| !n.is_empty());
+        config.hotkey_copy =
+            Some(self.hotkey_copy_input.trim().to_string()).filter(|h: &String| !h.is_empty());
+        config.hotkey_paste =
+            Some(self.hotkey_paste_input.trim().to_string()).filter(|h: &String| !h.is_empty());
         config.simple_token =
             Some(self.simple_token_input.trim().to_string()).filter(|t: &String| !t.is_empty());
         config.simple_mirror = self.simple_mirror_input;

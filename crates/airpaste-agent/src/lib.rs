@@ -13,13 +13,16 @@ mod state_file;
 pub use crate::config::{
     app_support_dir, default_device_name, Args, ClipboardMode, DEFAULT_SERVER_URL,
 };
+pub use crate::hotkey::{HotkeySpec, DEFAULT_COPY_HOTKEY, DEFAULT_PASTE_HOTKEY};
 pub use crate::outbox::stage_pasted_image_png;
 pub use crate::state_file::{AgentState, StateFile};
 use crate::{
     client::ServerClient,
     clipboard::Clipboard,
     discovery::PeerDirectory,
-    hotkey::{spawn_hotkey_listener, HotkeyAction, REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY},
+    hotkey::{
+        spawn_hotkey_listener, HotkeyAction, HotkeyChords, REMOTE_PASTE_HOTKEY_PASTES_AFTER_APPLY,
+    },
     identity::DeviceIdentity,
     paste::PasteSimulator,
     peer::{run_peer_server, PeerFileRegistry},
@@ -828,6 +831,7 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         );
     }
     let device_name = args.device_name();
+    let hotkey_chords = args.hotkey_chords().context("invalid hotkey configuration")?;
     let cache_dir = args.cache_dir();
     let state_file = StateFile::new(state_path);
     let mut state = state_file.load()?;
@@ -996,15 +1000,18 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     };
     if clip_ctx.is_isolated() {
         tracing::info!(
-            "clipboard isolated mode: {HOTKEY_MOD_NAME}+C publishes the current clipboard, {HOTKEY_MOD_NAME}+V pastes from AirPaste"
+            "clipboard isolated mode: {} publishes the current clipboard, {} pastes from AirPaste",
+            hotkey_chords.copy.label(),
+            hotkey_chords.paste.label()
         );
         // When untrusted this pops the system dialog that registers the app in the
         // Accessibility list, so the user only has to flip the toggle (needed again after
         // every rebuild: the TCC grant is keyed to the binary's code signature).
         if !paste.request_accessibility() {
             tracing::warn!(
-                "isolated mode's {HOTKEY_MOD_NAME}+V needs Accessibility permission to paste into \
-                 other apps; grant it in System Settings -> Privacy & Security -> Accessibility, then restart"
+                "isolated mode's {} needs Accessibility permission to paste into other apps; \
+                 grant it in System Settings -> Privacy & Security -> Accessibility, then restart",
+                hotkey_chords.paste.label()
             );
         }
     }
@@ -1095,6 +1102,7 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         paste,
         identity,
         args.remote_paste_hotkey,
+        hotkey_chords,
         file_policy,
         auto_apply_files,
         auto_paste_files,
@@ -2033,6 +2041,7 @@ async fn run_ws(
     paste: Arc<PasteSimulator>,
     identity: Arc<DeviceIdentity>,
     remote_paste_hotkey: bool,
+    hotkey_chords: HotkeyChords,
     file_policy: FileTransferPolicy,
     auto_apply_files: bool,
     auto_paste_files: bool,
@@ -2043,7 +2052,7 @@ async fn run_ws(
 ) -> anyhow::Result<()> {
     let (hotkey_tx, mut hotkey_rx) = mpsc::unbounded_channel::<HotkeyAction>();
     if remote_paste_hotkey && apply_remote {
-        match spawn_hotkey_listener(hotkey_tx, clip_ctx.is_isolated()) {
+        match spawn_hotkey_listener(hotkey_tx, clip_ctx.is_isolated(), hotkey_chords) {
             Ok(()) => {
                 let hotkey_client = client.clone();
                 let hotkey_clipboard = clipboard.clone();
@@ -2074,7 +2083,7 @@ async fn run_ws(
                                 &hotkey_shared,
                             )
                             .await
-                            .with_context(|| format!("{HOTKEY_MOD_NAME}+C failed")),
+                            .with_context(|| format!("{} failed", hotkey_chords.copy.label())),
                             HotkeyAction::PasteRemote => paste_remote_via_hotkey(
                                 &hotkey_clip_ctx,
                                 &hotkey_clipboard,
@@ -2092,7 +2101,7 @@ async fn run_ws(
                                 &hotkey_cache_dir,
                             )
                             .await
-                            .with_context(|| format!("{HOTKEY_MOD_NAME}+V failed")),
+                            .with_context(|| format!("{} failed", hotkey_chords.paste.label())),
                         };
                         match result {
                             Ok(toast) => hotkey_shared.push_toast(toast),

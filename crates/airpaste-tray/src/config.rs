@@ -36,6 +36,12 @@ pub struct TrayConfig {
     /// default ("Mac Agent" / "Windows Agent").
     #[serde(default)]
     pub device_name: Option<String>,
+    /// Chord for "send to AirPaste" (e.g. "ctrl+shift+c"); absent uses the agent default Alt+C.
+    #[serde(default)]
+    pub hotkey_copy: Option<String>,
+    /// Chord for "paste from AirPaste"; absent uses the agent default Alt+V.
+    #[serde(default)]
+    pub hotkey_paste: Option<String>,
 }
 
 /// `<app-support>/AirPaste/tray-config.json`.

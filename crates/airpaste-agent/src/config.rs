@@ -1,3 +1,4 @@
+use crate::hotkey::{DEFAULT_COPY_HOTKEY, DEFAULT_PASTE_HOTKEY};
 use clap::{Parser, ValueEnum};
 use std::{net::SocketAddr, path::PathBuf};
 
@@ -74,6 +75,14 @@ pub struct Args {
 
     #[arg(long, env = "AIRPASTE_DEVICE_NAME")]
     pub device_name: Option<String>,
+
+    /// Chord for "send to AirPaste" (isolated mode), e.g. "alt+c" or "ctrl+shift+f9".
+    #[arg(long, env = "AIRPASTE_HOTKEY_COPY")]
+    pub hotkey_copy: Option<String>,
+
+    /// Chord for "paste from AirPaste", e.g. "alt+v".
+    #[arg(long, env = "AIRPASTE_HOTKEY_PASTE")]
+    pub hotkey_paste: Option<String>,
 
     #[arg(long, env = "AIRPASTE_STATE")]
     pub state_path: Option<PathBuf>,
@@ -232,6 +241,28 @@ impl Args {
     pub fn cache_dir(&self) -> PathBuf {
         self.cache_dir.clone().unwrap_or_else(default_cache_dir)
     }
+
+    /// Parse the configured hotkey chords (falling back to Alt+C / Alt+V) and reject a config
+    /// where both actions share one chord.
+    pub fn hotkey_chords(&self) -> anyhow::Result<crate::hotkey::HotkeyChords> {
+        let copy = parse_hotkey_or_default(self.hotkey_copy.as_deref(), DEFAULT_COPY_HOTKEY)?;
+        let paste = parse_hotkey_or_default(self.hotkey_paste.as_deref(), DEFAULT_PASTE_HOTKEY)?;
+        if copy == paste {
+            anyhow::bail!(
+                "copy and paste hotkeys are both {}; they must differ",
+                copy.label()
+            );
+        }
+        Ok(crate::hotkey::HotkeyChords { copy, paste })
+    }
+}
+
+fn parse_hotkey_or_default(
+    value: Option<&str>,
+    default: &str,
+) -> anyhow::Result<crate::hotkey::HotkeySpec> {
+    let spec = value.map(str::trim).filter(|v| !v.is_empty());
+    crate::hotkey::HotkeySpec::parse(spec.unwrap_or(default))
 }
 
 /// Platform default device name, used when no custom name is configured (also shown by the

@@ -1,4 +1,4 @@
-use crate::hotkey::HotkeyAction;
+use crate::hotkey::{HotkeyAction, HotkeyChords, HotkeyKey, HotkeySpec};
 use anyhow::Context;
 use core_foundation_sys::base::{OSStatus, UInt32};
 use std::{ffi::c_void, mem::size_of, ptr::null_mut, sync::mpsc, time::Duration};
@@ -6,17 +6,94 @@ use std::{ffi::c_void, mem::size_of, ptr::null_mut, sync::mpsc, time::Duration};
 const HOTKEY_ID_REMOTE_PASTE: u32 = 1;
 const HOTKEY_ID_COPY: u32 = 2;
 const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"Apst");
-const KEY_CODE_V: u32 = 9;
-const KEY_CODE_C: u32 = 8;
-// Carbon optionKey modifier mask (Option == Alt). Used alone so the hotkey is Option+C / Option+V.
+// Carbon modifier masks (Events.h): cmdKey, shiftKey, optionKey, controlKey.
+const CMD_KEY: u32 = 1 << 8;
+const SHIFT_KEY: u32 = 1 << 9;
 const OPTION_KEY: u32 = 1 << 11;
+const CONTROL_KEY: u32 = 1 << 12;
 const NO_ERR: OSStatus = 0;
 const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
 const EVENT_KIND_HOTKEY_PRESSED: u32 = 5;
 const EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
 const TYPE_EVENT_HOTKEY_ID: u32 = u32::from_be_bytes(*b"hkid");
-const REMOTE_PASTE_HOTKEY_LABEL: &str = "Option+V";
-const COPY_HOTKEY_LABEL: &str = "Option+C";
+
+fn carbon_modifiers(spec: HotkeySpec) -> u32 {
+    let mut mods = 0;
+    if spec.alt {
+        mods |= OPTION_KEY;
+    }
+    if spec.ctrl {
+        mods |= CONTROL_KEY;
+    }
+    if spec.shift {
+        mods |= SHIFT_KEY;
+    }
+    if spec.meta {
+        mods |= CMD_KEY;
+    }
+    mods
+}
+
+/// ANSI-layout virtual key codes (Carbon Events.h kVK_ANSI_*).
+fn carbon_key_code(key: HotkeyKey) -> u32 {
+    match key {
+        HotkeyKey::Char(c) => match c {
+            b'A' => 0,
+            b'S' => 1,
+            b'D' => 2,
+            b'F' => 3,
+            b'H' => 4,
+            b'G' => 5,
+            b'Z' => 6,
+            b'X' => 7,
+            b'C' => 8,
+            b'V' => 9,
+            b'B' => 11,
+            b'Q' => 12,
+            b'W' => 13,
+            b'E' => 14,
+            b'R' => 15,
+            b'Y' => 16,
+            b'T' => 17,
+            b'1' => 18,
+            b'2' => 19,
+            b'3' => 20,
+            b'4' => 21,
+            b'6' => 22,
+            b'5' => 23,
+            b'9' => 25,
+            b'7' => 26,
+            b'8' => 28,
+            b'0' => 29,
+            b'O' => 31,
+            b'U' => 32,
+            b'I' => 34,
+            b'P' => 35,
+            b'L' => 37,
+            b'J' => 38,
+            b'K' => 40,
+            b'N' => 45,
+            b'M' => 46,
+            // HotkeySpec::parse only emits ascii alphanumerics, so this is unreachable.
+            other => unreachable!("unmapped hotkey character {other}"),
+        },
+        HotkeyKey::F(n) => match n {
+            1 => 122,
+            2 => 120,
+            3 => 99,
+            4 => 118,
+            5 => 96,
+            6 => 97,
+            7 => 98,
+            8 => 100,
+            9 => 101,
+            10 => 109,
+            11 => 103,
+            12 => 111,
+            other => unreachable!("unmapped function key F{other}"),
+        },
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -81,12 +158,13 @@ extern "C" {
 pub fn spawn_hotkey_listener(
     sender: tokio::sync::mpsc::UnboundedSender<HotkeyAction>,
     enable_copy: bool,
+    chords: HotkeyChords,
 ) -> anyhow::Result<()> {
     let (ready_tx, ready_rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("airpaste-hotkey".to_string())
         .spawn(move || {
-            if let Err(error) = run_hotkey_loop(sender, enable_copy, ready_tx) {
+            if let Err(error) = run_hotkey_loop(sender, enable_copy, chords, ready_tx) {
                 tracing::warn!(%error, "hotkey listener stopped");
             }
         })
@@ -107,6 +185,7 @@ pub fn spawn_hotkey_listener(
 fn run_hotkey_loop(
     sender: tokio::sync::mpsc::UnboundedSender<HotkeyAction>,
     enable_copy: bool,
+    chords: HotkeyChords,
     ready: mpsc::Sender<Result<(), String>>,
 ) -> anyhow::Result<()> {
     let sender = Box::into_raw(Box::new(sender));
@@ -146,8 +225,8 @@ fn run_hotkey_loop(
     let mut paste_ref = null_mut();
     let status = unsafe {
         RegisterEventHotKey(
-            KEY_CODE_V,
-            OPTION_KEY,
+            carbon_key_code(chords.paste.key),
+            carbon_modifiers(chords.paste),
             EventHotKeyID {
                 signature: HOTKEY_SIGNATURE,
                 id: HOTKEY_ID_REMOTE_PASTE,
@@ -164,7 +243,10 @@ fn run_hotkey_loop(
         }
         return fail_ready(
             ready,
-            format!("RegisterEventHotKey({REMOTE_PASTE_HOTKEY_LABEL}) failed with status {status}"),
+            format!(
+                "RegisterEventHotKey({}) failed with status {status}",
+                chords.paste.label()
+            ),
         );
     }
 
@@ -172,8 +254,8 @@ fn run_hotkey_loop(
     if enable_copy {
         let status = unsafe {
             RegisterEventHotKey(
-                KEY_CODE_C,
-                OPTION_KEY,
+                carbon_key_code(chords.copy.key),
+                carbon_modifiers(chords.copy),
                 EventHotKeyID {
                     signature: HOTKEY_SIGNATURE,
                     id: HOTKEY_ID_COPY,
@@ -191,7 +273,10 @@ fn run_hotkey_loop(
             }
             return fail_ready(
                 ready,
-                format!("RegisterEventHotKey({COPY_HOTKEY_LABEL}) failed with status {status}"),
+                format!(
+                    "RegisterEventHotKey({}) failed with status {status}",
+                    chords.copy.label()
+                ),
             );
         }
     }
@@ -203,9 +288,13 @@ fn run_hotkey_loop(
         sender,
     };
     if enable_copy {
-        tracing::info!("registered hotkeys {REMOTE_PASTE_HOTKEY_LABEL} and {COPY_HOTKEY_LABEL}");
+        tracing::info!(
+            "registered hotkeys {} and {}",
+            chords.paste.label(),
+            chords.copy.label()
+        );
     } else {
-        tracing::info!("registered remote paste hotkey {REMOTE_PASTE_HOTKEY_LABEL}");
+        tracing::info!("registered remote paste hotkey {}", chords.paste.label());
     }
     let _ = ready.send(Ok(()));
 
@@ -255,11 +344,11 @@ unsafe extern "C" fn handle_hotkey_event(
     }
 
     let (action, label) = match hotkey_id.id {
-        HOTKEY_ID_REMOTE_PASTE => (HotkeyAction::PasteRemote, REMOTE_PASTE_HOTKEY_LABEL),
-        HOTKEY_ID_COPY => (HotkeyAction::CopyToAirPaste, COPY_HOTKEY_LABEL),
+        HOTKEY_ID_REMOTE_PASTE => (HotkeyAction::PasteRemote, "remote-paste"),
+        HOTKEY_ID_COPY => (HotkeyAction::CopyToAirPaste, "copy-to-airpaste"),
         _ => return NO_ERR,
     };
-    tracing::info!("received hotkey {label}");
+    tracing::info!("received {label} hotkey");
     let _ = sender.send(action);
     NO_ERR
 }

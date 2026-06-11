@@ -43,6 +43,8 @@ More convenient, at a cost: every copy is sent out by default (the filter is onl
 
 To switch: toggle the "Isolated mode" checkbox in the tray window, or start the CLI with `--clipboard-mode=isolated` / `--clipboard-mode=system`.
 
+The two hotkeys are customizable ("发送热键" / "粘贴热键" in the tray settings, or `--hotkey-copy` / `--hotkey-paste`, e.g. `ctrl+shift+f9`) — handy when Alt+C clashes with another app, or when a Mac and a Windows box you reach over RDP would otherwise fight over the same chord.
+
 > macOS permission note: `Option+V` (simulating a paste into other apps) requires Accessibility permission; `Option+C` only reads the clipboard and needs no permission.
 
 ## Quick start (GUI only, no command line)
