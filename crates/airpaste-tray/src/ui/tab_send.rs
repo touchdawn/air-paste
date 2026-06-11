@@ -111,7 +111,7 @@ fn pasted_image_panel(app: &mut TrayApp, ui: &mut egui::Ui) {
         ui.add(
             egui::Image::new(&pending.texture)
                 .max_size(egui::vec2(ui.available_width(), 140.0))
-                .rounding(egui::Rounding::same(6.0)),
+                .corner_radius(egui::CornerRadius::same(6)),
         );
         ui.horizontal(|ui| {
             hint(
@@ -162,7 +162,7 @@ fn drop_zone(ui: &mut egui::Ui) {
     let stroke = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
     let text_color = ui.visuals().weak_text_color();
     let painter = ui.painter();
-    painter.rect_filled(rect, egui::Rounding::same(8.0), fill);
+    painter.rect_filled(rect, egui::CornerRadius::same(8), fill);
     let r = rect.shrink(0.5);
     for (a, b) in [
         (r.left_top(), r.right_top()),

@@ -28,7 +28,11 @@ pub fn window_icon() -> egui::IconData {
 pub fn paint_logo(ui: &mut egui::Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, egui::Rounding::same(size * 0.2), theme::ACCENT);
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::same((size * 0.2).round() as u8),
+        theme::ACCENT,
+    );
     let map = |x: f32, y: f32| rect.min + egui::vec2(x, y) * (size / 64.0);
     for (a, b, c) in [(TIP, WING_UPPER, FOLD), (TIP, FOLD, WING_LOWER)] {
         painter.add(egui::Shape::convex_polygon(

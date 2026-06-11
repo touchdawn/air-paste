@@ -12,10 +12,10 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
     let mod_name = airpaste_agent::HOTKEY_MOD_NAME;
 
     if let Some(pending) = app.agent.pending_files() {
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(theme::ACCENT.gamma_multiply(0.12))
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(format!(

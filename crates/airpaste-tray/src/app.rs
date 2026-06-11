@@ -144,6 +144,9 @@ struct Settings {
 pub(crate) struct TrayApp {
     // Kept alive for the lifetime of the app so the icon stays in the menu bar / tray.
     _tray: TrayIcon,
+    // Tray-menu clicks, forwarded by the handler installed in `new` (which also wakes the
+    // event loop — see there). Drained once per `logic` tick.
+    menu_events: mpsc::Receiver<MenuEvent>,
     show_id: MenuId,
     quit_id: MenuId,
     pub(crate) agent: AgentHandle,
@@ -206,9 +209,10 @@ fn install_cjk_font(ctx: &egui::Context) {
     };
 
     let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
+    fonts.font_data.insert(
+        "cjk".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
     fonts
         .families
         .entry(egui::FontFamily::Proportional)
@@ -248,8 +252,23 @@ impl TrayApp {
             .build()
             .expect("build tray icon");
 
+        // Forward menu events through our own channel and wake the event loop on each click.
+        // While the window is hidden eframe only re-runs `logic` when a repaint is requested,
+        // so without this nudge a tray click could sit unnoticed in the queue (and the menu
+        // would feel laggy even when visible, since the idle cadence is 200–500ms).
+        let menu_events = {
+            let ctx = cc.egui_ctx.clone();
+            let (tx, rx) = mpsc::channel();
+            MenuEvent::set_event_handler(Some(move |event| {
+                let _ = tx.send(event);
+                ctx.request_repaint();
+            }));
+            rx
+        };
+
         Self {
             _tray: tray,
+            menu_events,
             show_id: show.id().clone(),
             quit_id: quit.id().clone(),
             agent,
@@ -401,14 +420,23 @@ fn relaunch() {
 }
 
 impl eframe::App for TrayApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// The background tick. eframe 0.34 splits the per-frame callback: `logic` runs before
+    /// every `ui` pass AND keeps running while the window is hidden or minimized (`ui` is
+    /// skipped for invisible windows — emilk/egui#7950). Everything that must stay alive in
+    /// the background lives here: the tray-menu poll, the hotkey toasts, and the repaint
+    /// cadence — for a hidden window eframe only calls `logic` again when a repaint was
+    /// requested, so the `request_repaint_after` below is also what keeps this ticking.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll the tray menu channel and refresh the live status on a steady cadence; tray
-        // clicks and agent state changes do not arrive as winit events. While minimized
-        // nothing is on screen, so tick slower — just often enough that the tray menu and
-        // hotkey toasts stay responsive.
-        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
-        ctx.request_repaint_after(Duration::from_millis(if minimized { 500 } else { 200 }));
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
+        // clicks and agent state changes do not arrive as winit events. While hidden or
+        // minimized nothing is on screen, so tick slower — just often enough that the tray
+        // menu and hotkey toasts stay responsive.
+        let backgrounded = ctx.input(|i| {
+            let viewport = i.viewport();
+            viewport.minimized.unwrap_or(false) || !viewport.visible().unwrap_or(true)
+        });
+        ctx.request_repaint_after(Duration::from_millis(if backgrounded { 500 } else { 200 }));
+        while let Ok(event) = self.menu_events.try_recv() {
             if event.id == self.quit_id {
                 self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -421,15 +449,14 @@ impl eframe::App for TrayApp {
         }
 
         // Hotkey-feedback HUD (Alt+C / Alt+V): shown as a transient always-on-top floater.
+        // Driven from `logic` so it appears even while the main window is hidden.
         ui::toast::update(self, ctx);
 
         // A plain window close (red button / X) keeps the app alive in the tray; only the
-        // tray's Quit truly exits. On Windows the window is minimized, NOT hidden: eframe
-        // 0.29's redraw loop starves on hidden Windows windows (they never receive WM_PAINT,
-        // so the event loop degenerates into ControlFlow::Poll and spins a full CPU core,
-        // and update() — which drains the tray menu — stops running entirely). A minimized
-        // window keeps ticking normally and keeps its taskbar button, which is the chosen
-        // Windows policy anyway (see `platform::apply_tray_window_policy`).
+        // tray's Quit truly exits. On Windows the window is minimized, NOT hidden: it keeps
+        // its taskbar button so it stays findable via the taskbar and Alt-Tab (see
+        // `platform::apply_tray_window_policy`). macOS hides — the menu-bar icon is the
+        // persistent presence there.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if cfg!(windows) {
@@ -439,11 +466,28 @@ impl eframe::App for TrayApp {
             }
         }
 
-        // Native paste chord (Cmd+V): drained every frame so a paste on another tab cannot
+        // Native paste chord (Cmd+V): drained every tick so a paste on another tab cannot
         // fire later, but only the send tab accepts rich (file/image) pastes.
         if platform::take_paste_request() && self.tab == Tab::Send {
             self.handle_send_tab_paste(ctx);
         }
+
+        // Once the (re)connection succeeds, drop the one-shot pair code from the saved config so
+        // a later relaunch does not re-confirm an already-consumed code (a hard error).
+        if !self.pair_code_cleared && self.agent.connected() {
+            self.pair_code_cleared = true;
+            let mut config = TrayConfig::load();
+            if config.pair_code.is_some() {
+                config.pair_code = None;
+                let _ = config.save();
+            }
+            self.pair_code_input.clear();
+        }
+    }
+
+    /// The visible-window pass: everything that draws. Only runs while the window is shown.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
 
         // OS drag-and-drop: files dropped anywhere on the window are published as a file
         // manifest (recipients pull them with the remote-paste hotkey, like a copied file).
@@ -464,8 +508,12 @@ impl eframe::App for TrayApp {
                 egui::Order::Foreground,
                 egui::Id::new("file-drop-overlay"),
             ));
-            let rect = ctx.screen_rect();
-            painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(160));
+            let rect = ctx.content_rect();
+            painter.rect_filled(
+                rect,
+                egui::CornerRadius::ZERO,
+                egui::Color32::from_black_alpha(160),
+            );
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -475,29 +523,17 @@ impl eframe::App for TrayApp {
             );
         }
 
-        // Once the (re)connection succeeds, drop the one-shot pair code from the saved config so
-        // a later relaunch does not re-confirm an already-consumed code (a hard error).
-        if !self.pair_code_cleared && self.agent.connected() {
-            self.pair_code_cleared = true;
-            let mut config = TrayConfig::load();
-            if config.pair_code.is_some() {
-                config.pair_code = None;
-                let _ = config.save();
-            }
-            self.pair_code_input.clear();
-        }
-
         // Persistent chrome: header + tab strip on top, build identity pinned at the bottom.
-        egui::TopBottomPanel::top("header")
+        egui::Panel::top("header")
             .frame(
-                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
-                    left: 14.0,
-                    right: 14.0,
-                    top: 12.0,
-                    bottom: 8.0,
+                egui::Frame::side_top_panel(&ctx.global_style()).inner_margin(egui::Margin {
+                    left: 14,
+                    right: 14,
+                    top: 12,
+                    bottom: 8,
                 }),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui::header::show(self, ui);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -513,7 +549,7 @@ impl eframe::App for TrayApp {
                 });
             });
 
-        egui::TopBottomPanel::bottom("version_bar").show(ctx, |ui| {
+        egui::Panel::bottom("version_bar").show_inside(ui, |ui| {
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(ui::version_line())
@@ -523,11 +559,11 @@ impl eframe::App for TrayApp {
             ui.add_space(2.0);
         });
 
-        let frame = egui::Frame::central_panel(&ctx.style())
-            .inner_margin(egui::Margin::symmetric(14.0, 12.0));
+        let frame = egui::Frame::central_panel(&ctx.global_style())
+            .inner_margin(egui::Margin::symmetric(14, 12));
         egui::CentralPanel::default()
             .frame(frame)
-            .show(ctx, |ui| match self.tab {
+            .show_inside(ui, |ui| match self.tab {
                 Tab::Send => ui::tab_send::show(self, ui),
                 Tab::Inbox => ui::tab_inbox::show(self, ui),
                 Tab::Devices => ui::tab_devices::show(self, ui),

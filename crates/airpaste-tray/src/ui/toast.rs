@@ -2,10 +2,10 @@
 //! shown briefly after Alt+C / Alt+V so the user sees that the hotkey actually fired (the
 //! hotkeys are otherwise silent, which reads as "nothing happened").
 //!
-//! Rendered as an egui immediate viewport from the main `update()` loop, which keeps ticking
-//! on a steady cadence even while the tray window is hidden (macOS) or minimized (Windows) —
-//! the same cadence that polls the tray menu. The viewport is created inactive and
-//! mouse-transparent so it can never steal focus from the app the user is pasting into.
+//! Rendered as an egui immediate viewport from `App::logic`, which keeps ticking on a steady
+//! cadence even while the tray window is hidden (macOS) or minimized (Windows) — the same
+//! cadence that polls the tray menu. The viewport is created inactive and mouse-transparent
+//! so it can never steal focus from the app the user is pasting into.
 
 use std::time::{Duration, Instant};
 
@@ -77,7 +77,7 @@ fn show(ctx: &egui::Context, toast: &airpaste_agent::Toast) {
             .with_taskbar(false)
             .with_inner_size(size)
             .with_position(position),
-        move |ctx, _class| {
+        move |ui, _class| {
             let fill = egui::Color32::from_rgba_unmultiplied(0x1d, 0x1e, 0x21, 235);
             let accent = if is_error {
                 theme::DANGER
@@ -86,13 +86,13 @@ fn show(ctx: &egui::Context, toast: &airpaste_agent::Toast) {
             };
             egui::CentralPanel::default()
                 .frame(
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(fill)
-                        .rounding(12.0)
+                        .corner_radius(egui::CornerRadius::same(12))
                         .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.6)))
-                        .inner_margin(egui::Margin::symmetric(14.0, 8.0)),
+                        .inner_margin(egui::Margin::symmetric(14, 8)),
                 )
-                .show(ctx, |ui| {
+                .show_inside(ui, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label(
                             egui::RichText::new(&text)

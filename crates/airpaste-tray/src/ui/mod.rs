@@ -60,10 +60,10 @@ pub fn status_dot(ui: &mut egui::Ui, color: egui::Color32) {
 
 /// A small tinted pill, e.g. the "未信任" device badge.
 pub fn badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(color.gamma_multiply(0.18))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(7.0, 1.0))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(7, 1))
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).size(11.0).color(color));
         });

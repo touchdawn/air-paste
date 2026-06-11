@@ -45,7 +45,7 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 fn tune(v: &mut egui::Visuals, dark: bool) {
-    let rounding = egui::Rounding::same(6.0);
+    let corner_radius = egui::CornerRadius::same(6);
     for w in [
         &mut v.widgets.noninteractive,
         &mut v.widgets.inactive,
@@ -53,9 +53,9 @@ fn tune(v: &mut egui::Visuals, dark: bool) {
         &mut v.widgets.active,
         &mut v.widgets.open,
     ] {
-        w.rounding = rounding;
+        w.corner_radius = corner_radius;
     }
-    v.window_rounding = egui::Rounding::same(10.0);
+    v.window_corner_radius = egui::CornerRadius::same(10);
     // Selected tabs / text selection: translucent accent so it reads in both themes.
     v.selection.bg_fill = ACCENT.gamma_multiply(if dark { 0.45 } else { 0.30 });
     v.selection.stroke = egui::Stroke::new(
