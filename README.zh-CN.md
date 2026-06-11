@@ -89,7 +89,24 @@ macOS：
 ```bash
 cargo build -p airpaste-tray            # 托盘 GUI（内嵌 agent）
 cargo build -p airpaste-server -p airpaste-agent   # CLI 服务器 + agent
+scripts/bundle-macos.sh                 # 打包 dist/AirPaste.app（菜单栏应用，无 Dock 图标）
 ```
+
+### macOS 签名：让辅助功能授权跨构建保留
+
+macOS 的辅助功能授权（`Option+V` 需要）是按 app 的代码签名识别的。`bundle-macos.sh` 默认 ad-hoc 签名，每次打包签名都会变，所以**每次重新打包后都得去系统设置里重新开关一次授权**。一次性创建自签名证书即可解决：
+
+1. 打开「钥匙串访问」→ 菜单栏 钥匙串访问 → 证书助理 → **创建证书…**
+2. 名称填 `AirPaste Dev`，身份类型选「自签名根证书」，证书类型选「**代码签名**」，点创建。
+3. 之后 `scripts/bundle-macos.sh` 检测到该证书就会自动用它签名（首次签名时钥匙串会弹窗询问，点「始终允许」）。想用别的证书名可设置环境变量 `AIRPASTE_SIGN_IDENTITY`。
+
+从 ad-hoc 切换到证书签名后的第一次（仅此一次）需要清掉旧授权记录再重新授权：
+
+```bash
+sudo tccutil reset Accessibility com.airpaste.tray
+```
+
+之后无论重新打包多少次，授权都不会再失效。
 
 Windows（首次运行会安装 Rust，并在 `tools/winlibs` 下下载便携版 WinLibs MinGW 工具链；网络可直连时省略 `-Proxy`）：
 

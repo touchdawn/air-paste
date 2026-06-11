@@ -48,6 +48,20 @@ if [ -f "crates/airpaste-tray/assets/AppIcon.icns" ]; then
         2>/dev/null || true
 fi
 
+# TCC (Accessibility) identifies the app by its code signature. Ad-hoc signatures change on
+# every build, which invalidates the grant after each re-bundle. Signing with a stable
+# self-signed certificate keeps the grant across rebuilds; see README "macOS signing".
+IDENTITY="${AIRPASTE_SIGN_IDENTITY:-AirPaste Dev}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$IDENTITY\""; then
+    codesign --force --sign "$IDENTITY" "$APP"
+    echo "Signed with identity: $IDENTITY (Accessibility grant survives rebuilds)"
+else
+    codesign --force --sign - "$APP"
+    echo "Signed ad-hoc: \"$IDENTITY\" certificate not found in the keychain."
+    echo "Accessibility permission will need re-granting after every re-bundle;"
+    echo "see README \"macOS signing\" for the one-time certificate setup."
+fi
+
 echo "Built $APP"
 echo "Run it:   open \"$ROOT/$APP\""
 echo "Install:  cp -R \"$ROOT/$APP\" /Applications/   (then toggle 开机自启 in the window)"

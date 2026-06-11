@@ -89,7 +89,24 @@ macOS:
 ```bash
 cargo build -p airpaste-tray            # tray GUI (embedded agent)
 cargo build -p airpaste-server -p airpaste-agent   # CLI server + agent
+scripts/bundle-macos.sh                 # bundle dist/AirPaste.app (menu-bar app, no Dock icon)
 ```
+
+### macOS signing: keep the Accessibility grant across rebuilds
+
+macOS identifies an app's Accessibility grant (needed for `Option+V`) by its code signature. `bundle-macos.sh` signs ad-hoc by default, and ad-hoc signatures change on every build — so **after each re-bundle you have to re-toggle the permission in System Settings**. A one-time self-signed certificate fixes this:
+
+1. Open **Keychain Access** → menu bar Keychain Access → Certificate Assistant → **Create a Certificate…**
+2. Name it `AirPaste Dev`, set Identity Type to "Self-Signed Root" and Certificate Type to "**Code Signing**", then create it.
+3. From then on `scripts/bundle-macos.sh` detects the certificate and signs with it automatically (the keychain prompts on first use — click "Always Allow"). Set `AIRPASTE_SIGN_IDENTITY` to use a different certificate name.
+
+The first build after switching from ad-hoc to certificate signing (once only) needs the stale grant cleared before re-granting:
+
+```bash
+sudo tccutil reset Accessibility com.airpaste.tray
+```
+
+After that, the grant survives any number of rebuilds.
 
 Windows (first time, installs Rust + a portable WinLibs MinGW toolchain under `tools/winlibs`; omit `-Proxy` if direct network access works):
 
