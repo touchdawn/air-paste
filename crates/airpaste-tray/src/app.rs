@@ -148,7 +148,7 @@ pub(crate) struct TrayApp {
     quit_id: MenuId,
     pub(crate) agent: AgentHandle,
     // Set when the user picks Quit, so the window close that follows actually exits (a plain
-    // window close just hides the window — the app keeps living in the tray).
+    // window close just hides/minimizes the window — the app keeps living in the tray).
     quitting: bool,
     pub(crate) tab: Tab,
     // Settings panel state.
@@ -403,8 +403,11 @@ fn relaunch() {
 impl eframe::App for TrayApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Poll the tray menu channel and refresh the live status on a steady cadence; tray
-        // clicks and agent state changes do not arrive as winit events.
-        ctx.request_repaint_after(Duration::from_millis(200));
+        // clicks and agent state changes do not arrive as winit events. While minimized
+        // nothing is on screen, so tick slower — just often enough that the tray menu and
+        // hotkey toasts stay responsive.
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        ctx.request_repaint_after(Duration::from_millis(if minimized { 500 } else { 200 }));
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.quit_id {
                 self.quitting = true;
@@ -420,11 +423,20 @@ impl eframe::App for TrayApp {
         // Hotkey-feedback HUD (Alt+C / Alt+V): shown as a transient always-on-top floater.
         ui::toast::update(self, ctx);
 
-        // A plain window close (red button / X) hides the window and keeps the app in the tray;
-        // only the tray's Quit truly exits.
+        // A plain window close (red button / X) keeps the app alive in the tray; only the
+        // tray's Quit truly exits. On Windows the window is minimized, NOT hidden: eframe
+        // 0.29's redraw loop starves on hidden Windows windows (they never receive WM_PAINT,
+        // so the event loop degenerates into ControlFlow::Poll and spins a full CPU core,
+        // and update() — which drains the tray menu — stops running entirely). A minimized
+        // window keeps ticking normally and keeps its taskbar button, which is the chosen
+        // Windows policy anyway (see `platform::apply_tray_window_policy`).
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if cfg!(windows) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
         }
 
         // Native paste chord (Cmd+V): drained every frame so a paste on another tab cannot

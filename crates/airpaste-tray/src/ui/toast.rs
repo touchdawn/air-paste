@@ -3,9 +3,9 @@
 //! hotkeys are otherwise silent, which reads as "nothing happened").
 //!
 //! Rendered as an egui immediate viewport from the main `update()` loop, which keeps ticking
-//! every 200ms even while the tray window is hidden (the same cadence that polls the tray
-//! menu). The viewport is created inactive and mouse-transparent so it can never steal focus
-//! from the app the user is pasting into.
+//! on a steady cadence even while the tray window is hidden (macOS) or minimized (Windows) —
+//! the same cadence that polls the tray menu. The viewport is created inactive and
+//! mouse-transparent so it can never steal focus from the app the user is pasting into.
 
 use std::time::{Duration, Instant};
 
