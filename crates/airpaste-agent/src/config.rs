@@ -234,7 +234,9 @@ impl Args {
     }
 }
 
-fn default_device_name() -> String {
+/// Platform default device name, used when no custom name is configured (also shown by the
+/// tray settings as the "leave empty" hint).
+pub fn default_device_name() -> String {
     #[cfg(windows)]
     {
         "Windows Agent".to_string()

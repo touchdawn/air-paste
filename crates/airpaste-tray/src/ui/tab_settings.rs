@@ -17,6 +17,17 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
                 .hint_text("http://主机:端口"),
         );
     });
+    form_row(ui, "设备名称", |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut app.device_name_input)
+                .desired_width(f32::INFINITY)
+                .hint_text(format!(
+                    "留空使用默认:{}",
+                    airpaste_agent::default_device_name()
+                )),
+        )
+        .on_hover_text("本机在各设备的设备列表中显示的名称。保存并连接后同步到服务器。");
+    });
     form_row(ui, "配对码", |ui| {
         ui.add(
             egui::TextEdit::singleline(&mut app.pair_code_input)

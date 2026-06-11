@@ -12,7 +12,8 @@ use airpaste_protocol::{
     rest_body_sha256_base64url, rest_signing_message, ClipSummary, ConfirmPairingRequest,
     ConfirmPairingResponse, CreateClipRequest, CreateClipResponse, CreateRelaySessionRequest,
     CreateRelaySessionResponse, HealthResponse, RegisterDeviceRequest, RegisterDeviceResponse,
-    ServerEvent, SimpleClipLatest, SimpleClipUpload, StartPairingRequest, StartPairingResponse,
+    RenameDeviceRequest, RenameDeviceResponse, ServerEvent, SimpleClipLatest, SimpleClipUpload,
+    StartPairingRequest, StartPairingResponse,
     TrustDeviceResponse, AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER,
     AIRPASTE_NONCE_HEADER, AIRPASTE_REST_SIGNATURE_ALG, AIRPASTE_SIGNATURE_ALG_HEADER,
     AIRPASTE_SIGNATURE_HEADER, AIRPASTE_TIMESTAMP_HEADER,
@@ -42,6 +43,8 @@ const SIMPLE_CLIP_TTL_SECS: i64 = 600;
 /// Scheme marker for plaintext clips minted on behalf of simple devices; anything other than the
 /// E2E scheme takes the agents' legacy-plaintext apply path.
 const SIMPLE_PLAINTEXT_SCHEME: &str = "plaintext-simple-v1";
+/// Upper bound for device display names (in characters, not bytes).
+const MAX_DEVICE_NAME_CHARS: usize = 64;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -49,6 +52,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/devices", get(list_devices).post(register_device))
         .route("/v1/devices/:device_id/trust", post(trust_device))
+        .route("/v1/devices/:device_id/rename", post(rename_device))
         .route("/v1/pair/start", post(start_pairing))
         .route("/v1/pair/confirm", post(confirm_pairing))
         .route("/v1/clips", post(create_clip))
@@ -114,6 +118,33 @@ async fn trust_device(
         device_id: device.device_id.clone(),
     });
     Ok(Json(TrustDeviceResponse { device }))
+}
+
+/// Rename a registered device. The requester must be trusted: agents rename themselves on
+/// startup when their configured name changes, and a trusted device may also relabel another
+/// one (the same authority as trusting it).
+async fn rename_device(
+    State(state): State<Arc<AppState>>,
+    TrustedDevice(_request_device): TrustedDevice,
+    Path(device_id): Path<String>,
+    Json(request): Json<RenameDeviceRequest>,
+) -> ApiResult<Json<RenameDeviceResponse>> {
+    let name = request.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("device name must not be empty"));
+    }
+    if name.chars().count() > MAX_DEVICE_NAME_CHARS {
+        return Err(ApiError::bad_request("device name too long"));
+    }
+    let device_id = DeviceId::from(device_id);
+    let device = state
+        .store
+        .rename_device(&device_id, name)
+        .map_err(|error| match error {
+            StoreError::NotFound => ApiError::not_found("device not found"),
+            other => ApiError::from(other),
+        })?;
+    Ok(Json(RenameDeviceResponse { device }))
 }
 
 async fn start_pairing(

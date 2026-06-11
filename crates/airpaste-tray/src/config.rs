@@ -32,6 +32,10 @@ pub struct TrayConfig {
     /// simple-device inbox so simple devices can read it.
     #[serde(default)]
     pub simple_mirror: bool,
+    /// Custom name for this device in every device list; absent uses the agent's platform
+    /// default ("Mac Agent" / "Windows Agent").
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 /// `<app-support>/AirPaste/tray-config.json`.

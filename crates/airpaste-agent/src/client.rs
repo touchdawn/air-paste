@@ -6,8 +6,9 @@ use airpaste_core::{
 use airpaste_protocol::{
     rest_body_sha256_base64url, ConfirmPairingRequest, ConfirmPairingResponse, CreateClipRequest,
     CreateClipResponse, CreateRelaySessionRequest, CreateRelaySessionResponse,
-    RegisterDeviceRequest, RegisterDeviceResponse, StartPairingRequest, StartPairingResponse,
-    TrustDeviceResponse, AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER,
+    RegisterDeviceRequest, RegisterDeviceResponse, RenameDeviceRequest, RenameDeviceResponse,
+    StartPairingRequest, StartPairingResponse, TrustDeviceResponse,
+    AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER,
     AIRPASTE_NONCE_HEADER, AIRPASTE_REST_SIGNATURE_ALG, AIRPASTE_SIGNATURE_ALG_HEADER,
     AIRPASTE_SIGNATURE_HEADER, AIRPASTE_TIMESTAMP_HEADER,
 };
@@ -175,6 +176,26 @@ impl ServerClient {
             .json::<TrustDeviceResponse>()
             .await
             .context("failed to decode trust device response")?;
+        Ok(response.device)
+    }
+
+    /// Rename a device (this device must already be trusted). The server only learns a name at
+    /// registration, so a changed local device-name config is pushed through this on startup.
+    pub async fn rename_device(&self, device_id: &DeviceId, name: String) -> anyhow::Result<Device> {
+        let request = RenameDeviceRequest { name };
+        let response = self
+            .signed_json(
+                "POST",
+                &format!("/v1/devices/{}/rename", device_id.as_str()),
+                &request,
+            )
+            .await?
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<RenameDeviceResponse>()
+            .await
+            .context("failed to decode rename device response")?;
         Ok(response.device)
     }
 

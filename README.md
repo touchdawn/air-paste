@@ -65,7 +65,7 @@ Then, all in the tray window:
 
 1. **On A**: open the settings panel, keep the default server URL `http://127.0.0.1:14444`, check **“Run server on this device”**, click **Save & Connect**. As the first device it is trusted automatically → `● Connected`.
 2. **On A**: click **“Generate pair code”** and note the 6-digit code.
-3. **On B**: enter A's LAN address (`http://<A's IP>:14444`) as the server URL, paste the pair code, click **Save & Connect** → `● Connected`.
+3. **On B**: enter A's LAN address (`http://<A's IP>:14444`) as the server URL, paste the pair code, click **Save & Connect** → `● Connected`. Optionally fill in **“设备名称”** (device name) on each device so the device list shows e.g. "Bedroom PC" instead of several identical "Windows Agent" entries — a changed name syncs to the server on the next launch.
 4. Copy on one device, press `Option+C` / `Alt+C` to send; press `Option+V` / `Alt+V` on the other to paste. Done.
 
 > macOS: grant Accessibility permission (System Settings → Privacy & Security → Accessibility) to the tray app, otherwise the paste hotkey cannot type into other apps. Check **“Launch at login”** on each device if you want it to start automatically.

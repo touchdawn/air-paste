@@ -10,7 +10,9 @@ mod peer;
 mod relay;
 mod state_file;
 
-pub use crate::config::{app_support_dir, Args, ClipboardMode, DEFAULT_SERVER_URL};
+pub use crate::config::{
+    app_support_dir, default_device_name, Args, ClipboardMode, DEFAULT_SERVER_URL,
+};
 pub use crate::outbox::stage_pasted_image_png;
 pub use crate::state_file::{AgentState, StateFile};
 use crate::{
@@ -876,6 +878,23 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
             .context("failed to confirm pairing")?;
         tracing::info!(trusted = device.trusted, "pairing confirmed");
     }
+    // The server only learns the device name at registration; when the configured name has
+    // changed since the last sync (or for state files from before the name was tracked), push
+    // it. Failure is not fatal — an untrusted device cannot rename itself yet, so this retries
+    // on the next launch.
+    if state.device_name.as_deref() != Some(device_name.as_str()) {
+        match client
+            .rename_device(&device_id, device_name.clone())
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(name = %device_name, "device name synced to server");
+                state.device_name = Some(device_name.clone());
+                state_file.save(&state)?;
+            }
+            Err(error) => tracing::warn!(%error, "failed to sync device name to server"),
+        }
+    }
     if args.create_pair_code {
         let response = client
             .start_pairing(device_id.clone(), args.pair_ttl_seconds)
@@ -1199,6 +1218,7 @@ async fn ensure_device(
         .await
         .context("failed to register device")?;
     state.device_id = Some(device.device_id.clone());
+    state.device_name = Some(name.to_string());
     state_file.save(state)?;
     Ok(device.device_id)
 }

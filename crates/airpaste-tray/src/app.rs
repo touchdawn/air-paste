@@ -49,6 +49,9 @@ pub fn run() -> eframe::Result<()> {
     if args.auth_token.is_none() {
         args.auth_token = config.auth_token.clone().filter(|t| !t.is_empty());
     }
+    if args.device_name.is_none() {
+        args.device_name = config.device_name.clone().filter(|n| !n.trim().is_empty());
+    }
     // An explicit --simple-mirror=true (or env) wins; otherwise the saved checkbox applies.
     args.simple_mirror = args.simple_mirror || config.simple_mirror;
 
@@ -58,6 +61,7 @@ pub fn run() -> eframe::Result<()> {
         server_url: args.server_url.clone(),
         auth_token: args.auth_token.clone().unwrap_or_default(),
         pair_code: args.pair_code.clone().unwrap_or_default(),
+        device_name: args.device_name.clone().unwrap_or_default(),
         simple_token: config.simple_token.clone().unwrap_or_default(),
         simple_mirror: args.simple_mirror,
     };
@@ -122,6 +126,7 @@ struct Settings {
     server_url: String,
     auth_token: String,
     pair_code: String,
+    device_name: String,
     simple_token: String,
     simple_mirror: bool,
 }
@@ -141,6 +146,8 @@ pub(crate) struct TrayApp {
     pub(crate) server_url_input: String,
     pub(crate) auth_token_input: String,
     pub(crate) pair_code_input: String,
+    // Custom device name; empty means "use the platform default".
+    pub(crate) device_name_input: String,
     // Simple-device access (e.g. iPhone Shortcuts): embedded-server token + mirror toggle.
     // Both apply on save-and-relaunch like the connection settings.
     pub(crate) simple_token_input: String,
@@ -239,6 +246,7 @@ impl TrayApp {
             server_url_input: settings.server_url,
             auth_token_input: settings.auth_token,
             pair_code_input: settings.pair_code,
+            device_name_input: settings.device_name,
             simple_token_input: settings.simple_token,
             simple_mirror_input: settings.simple_mirror,
             pair_code_cleared: false,
@@ -313,6 +321,8 @@ impl TrayApp {
             Some(self.auth_token_input.trim().to_string()).filter(|t: &String| !t.is_empty());
         config.pair_code =
             Some(self.pair_code_input.trim().to_string()).filter(|c: &String| !c.is_empty());
+        config.device_name =
+            Some(self.device_name_input.trim().to_string()).filter(|n: &String| !n.is_empty());
         config.simple_token =
             Some(self.simple_token_input.trim().to_string()).filter(|t: &String| !t.is_empty());
         config.simple_mirror = self.simple_mirror_input;

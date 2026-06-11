@@ -9,6 +9,10 @@ pub struct AgentState {
     pub device_private_key: Option<String>,
     #[serde(default)]
     pub device_encryption_private_key: Option<String>,
+    /// Device name last synced to the server; a differing configured name triggers a rename on
+    /// startup (the server only learns the name at registration otherwise).
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]

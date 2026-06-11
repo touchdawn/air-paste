@@ -86,6 +86,15 @@ impl Store {
         Ok(device)
     }
 
+    pub fn rename_device(&self, device_id: &DeviceId, name: String) -> StoreResult<Device> {
+        let mut device: Device = self
+            .get(DEVICES, device_id.as_str())?
+            .ok_or(StoreError::NotFound)?;
+        device.name = name;
+        self.put(DEVICES, device.device_id.as_str(), &device)?;
+        Ok(device)
+    }
+
     pub fn get_device(&self, device_id: &DeviceId) -> StoreResult<Option<Device>> {
         self.get(DEVICES, device_id.as_str())
     }

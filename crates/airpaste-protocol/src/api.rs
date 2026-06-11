@@ -112,6 +112,17 @@ pub struct TrustDeviceResponse {
     pub device: Device,
 }
 
+/// `POST /v1/devices/:device_id/rename` request body.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenameDeviceRequest {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenameDeviceResponse {
+    pub device: Device,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateClipRequest {
     pub source_device_id: DeviceId,
