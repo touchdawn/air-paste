@@ -10,12 +10,19 @@ use crate::theme;
 use crate::ui::{hint, primary_button, status_line, Tab};
 
 pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
-    ui.add(
-        egui::TextEdit::multiline(&mut app.send_input)
-            .desired_rows(4)
-            .desired_width(f32::INFINITY)
-            .hint_text("输入或粘贴要发送的文字…"),
-    );
+    // Cap the draft's height: a multiline TextEdit grows with its content, and a long
+    // paste would otherwise push the drop zone and send button below the window edge.
+    egui::ScrollArea::vertical()
+        .id_salt("send_draft")
+        .max_height(160.0)
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut app.send_input)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("输入或粘贴要发送的文字…"),
+            );
+        });
 
     pasted_image_panel(app, ui);
 
