@@ -14,17 +14,21 @@ use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 /// Open the database, build the router, bind, and serve until `shutdown` resolves.
+/// `simple_token` enables the `/v1/simple/*` text endpoints for clients without device signing
+/// or E2E crypto (e.g. iPhone Shortcuts); `None` keeps them disabled.
 pub async fn serve(
     bind: SocketAddr,
     db: &Path,
     auth_token: Option<String>,
+    simple_token: Option<String>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let store =
         Store::open(db).with_context(|| format!("failed to open database at {}", db.display()))?;
     let auth_token = auth_token.filter(|token| !token.is_empty());
     let auth_enabled = auth_token.is_some();
-    let state = Arc::new(AppState::new(store, auth_token));
+    let simple_token = simple_token.filter(|token| !token.is_empty());
+    let state = Arc::new(AppState::new(store, auth_token, simple_token));
     let app = router(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());

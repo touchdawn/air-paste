@@ -307,6 +307,8 @@ pub struct AgentShared {
     file_apply: std::sync::Mutex<Option<FileApplyCtx>>,
     // Text-clip TTL from the launch args, so UI sends expire like hotkey/poll publishes do.
     text_clip_ttl_secs: u64,
+    // Mirror explicit sends (Alt+C / UI) to the server's simple-device inbox (--simple-mirror).
+    simple_mirror: bool,
     // Pending hotkey-feedback toasts, drained by the tray UI (bounded; harmlessly
     // accumulates-then-drops when no UI is attached, e.g. the bare CLI agent).
     toasts: std::sync::Mutex<Vec<Toast>>,
@@ -337,6 +339,7 @@ impl AgentShared {
             file_publish: std::sync::Mutex::new(None),
             file_apply: std::sync::Mutex::new(None),
             text_clip_ttl_secs: args.text_clip_ttl_secs,
+            simple_mirror: args.simple_mirror,
             toasts: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -519,14 +522,16 @@ impl AgentHandle {
         *self.shared.send_text.lock().unwrap() = Some(SendStatus::Sending);
         let shared = self.shared.clone();
         let ttl_secs = self.shared.text_clip_ttl_secs;
+        let mirror_simple = self.shared.simple_mirror;
         self.shared.runtime.spawn(async move {
-            let status = match publish_text_clip(&client, &device_id, text, ttl_secs).await {
-                Ok(response) => {
-                    tracing::info!(clip_id = %response.clip_id, "published text clip from UI");
-                    SendStatus::Sent
-                }
-                Err(error) => SendStatus::Failed(format!("{error:#}")),
-            };
+            let status =
+                match publish_text_clip(&client, &device_id, text, ttl_secs, mirror_simple).await {
+                    Ok(response) => {
+                        tracing::info!(clip_id = %response.clip_id, "published text clip from UI");
+                        SendStatus::Sent
+                    }
+                    Err(error) => SendStatus::Failed(format!("{error:#}")),
+                };
             *shared.send_text.lock().unwrap() = Some(status);
         });
     }
@@ -929,9 +934,15 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(text) = args.publish_text_once.clone() {
-        let response = publish_text_clip(&client, &device_id, text, text_clip_ttl_secs)
-            .await
-            .context("failed to publish text clip")?;
+        let response = publish_text_clip(
+            &client,
+            &device_id,
+            text,
+            text_clip_ttl_secs,
+            args.simple_mirror,
+        )
+        .await
+        .context("failed to publish text clip")?;
         println!("{}", serde_json::to_string(&response)?);
         return Ok(());
     }
@@ -1291,7 +1302,9 @@ async fn poll_clipboard(
             continue;
         }
 
-        match publish_text_clip(&client, &device_id, text, text_clip_ttl_secs).await {
+        // Auto-published clipboard changes are never mirrored to the simple inbox: only an
+        // explicit send is taken as intent to expose plaintext to simple devices.
+        match publish_text_clip(&client, &device_id, text, text_clip_ttl_secs, false).await {
             Ok(response) => tracing::info!(clip_id = %response.clip_id, "published text clip"),
             Err(error) => tracing::warn!(%error, "failed to publish text clip"),
         }
@@ -1302,11 +1315,14 @@ async fn poll_clipboard(
 ///
 /// Sealing only needs the recipients' public keys, so the local encryption identity is
 /// not required here; the sender is included as a recipient via the trusted device list.
+/// `mirror_simple` additionally sends the plaintext to the server's simple-device inbox (for
+/// clients like iPhone Shortcuts); only explicit sends should set it, never clipboard polling.
 async fn publish_text_clip(
     client: &ServerClient,
     device_id: &DeviceId,
     text: String,
     ttl_secs: u64,
+    mirror_simple: bool,
 ) -> anyhow::Result<CreateClipResponse> {
     let recipients = trusted_encryption_recipients(client).await?;
     if recipients.is_empty() {
@@ -1341,6 +1357,7 @@ async fn publish_text_clip(
                 body_nonce: Some(sealed.body_nonce_base64),
             },
             text_clip_expires_at(ttl_secs),
+            mirror_simple.then(|| text.clone()),
         )
         .await
 }
@@ -1548,6 +1565,7 @@ async fn publish_file_manifest(
                 wrapped_keys: Vec::new(),
                 body_nonce: None,
             },
+            None,
             None,
         )
         .await?;
@@ -2462,8 +2480,14 @@ async fn copy_selection_to_airpaste(
             tracing::info!("{HOTKEY_MOD_NAME}+C: clipboard unchanged since last push, skipping");
             return Ok(Toast::info("内容未变化,无需重发"));
         }
-        let response =
-            publish_text_clip(client, device_id, text.clone(), text_clip_ttl_secs).await?;
+        let response = publish_text_clip(
+            client,
+            device_id,
+            text.clone(),
+            text_clip_ttl_secs,
+            shared.simple_mirror,
+        )
+        .await?;
         *last_pushed.lock().await = Some(text);
         tracing::info!(clip_id = %response.clip_id, "pushed clipboard to AirPaste");
         return Ok(Toast::info("已发送到 AirPaste"));

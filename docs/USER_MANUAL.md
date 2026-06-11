@@ -641,6 +641,7 @@ Start-Process `
 | `--bind` | `AIRPASTE_BIND` | `0.0.0.0:14444` | server 监听地址 |
 | `--db` | `AIRPASTE_DB` | `airpaste.redb` | redb 数据库路径 |
 | `--auth-token` | `AIRPASTE_AUTH_TOKEN` | 空 | 启用 Bearer token 保护 |
+| `--simple-token` | `AIRPASTE_SIMPLE_TOKEN` | 空 | 启用 `/v1/simple/*` 简单设备文本接口（iPhone 快捷指令等），见 `docs/IOS_SHORTCUTS.md` |
 
 ### 10.2 Agent
 
@@ -674,6 +675,7 @@ Start-Process `
 | `--remote-paste-hotkey` | `AIRPASTE_REMOTE_PASTE_HOTKEY` | `true` | 是否启用 `Alt+V` |
 | `--auto-apply-files` | `AIRPASTE_AUTO_APPLY_FILES` | `false` | 收到文件清单后是否自动下载 |
 | `--auto-paste-files` | `AIRPASTE_AUTO_PASTE_FILES` | `false` | 自动下载后是否模拟粘贴 |
+| `--simple-mirror` | `AIRPASTE_SIMPLE_MIRROR` | `false` | 显式发送的文本额外明文镜像到服务器简单设备收件箱（iPhone 快捷指令等），见 `docs/IOS_SHORTCUTS.md` |
 
 ## 11. 安全和隐私说明
 

@@ -32,6 +32,18 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
                 .hint_text("可选"),
         );
     });
+    form_row(ui, "简单设备令牌", |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut app.simple_token_input)
+                .password(true)
+                .desired_width(f32::INFINITY)
+                .hint_text("可选,iPhone 快捷指令等使用"),
+        )
+        .on_hover_text(
+            "为本机内嵌服务器开启 /v1/simple 文本接口。简单设备凭此令牌上传/下载文本,\
+             内容对服务器是明文(传输建议走 HTTPS)。留空则关闭。",
+        );
+    });
 
     hairline(ui);
 
@@ -53,6 +65,13 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
             {
                 app.agent.set_isolated(isolated);
             }
+
+            ui.checkbox(&mut app.simple_mirror_input, "镜像给简单设备")
+                .on_hover_text(
+                    "Alt+C / 点「发送」的文本额外以明文存入服务器的简单设备收件箱,\
+                     供 iPhone 快捷指令等读取。需要服务器配置简单设备令牌。\
+                     保存并连接后生效。",
+                );
 
             let mut run_server = app.server.is_running();
             if ui

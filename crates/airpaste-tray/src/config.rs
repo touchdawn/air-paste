@@ -24,6 +24,14 @@ pub struct TrayConfig {
     /// Run an embedded control-plane server on this machine (for other devices to connect to).
     #[serde(default)]
     pub run_server: bool,
+    /// Token for the embedded server's `/v1/simple/*` endpoints (simple devices like iPhone
+    /// Shortcuts). Empty/absent keeps those endpoints disabled.
+    #[serde(default)]
+    pub simple_token: Option<String>,
+    /// Mirror explicitly sent text (Alt+C / the send button) as plaintext to the server's
+    /// simple-device inbox so simple devices can read it.
+    #[serde(default)]
+    pub simple_mirror: bool,
 }
 
 /// `<app-support>/AirPaste/tray-config.json`.

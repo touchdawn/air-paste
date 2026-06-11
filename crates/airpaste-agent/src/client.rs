@@ -203,12 +203,14 @@ impl ServerClient {
         kind: ClipKind,
         encryption: EncryptionInfo,
         expires_at: Option<Timestamp>,
+        simple_mirror_text: Option<String>,
     ) -> anyhow::Result<CreateClipResponse> {
         let request = CreateClipRequest {
             source_device_id,
             expires_at,
             kind,
             encryption,
+            simple_mirror_text,
         };
         self.signed_json("POST", "/v1/clips", &request)
             .await?

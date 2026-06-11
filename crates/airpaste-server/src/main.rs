@@ -14,6 +14,11 @@ struct Args {
 
     #[arg(long, env = "AIRPASTE_AUTH_TOKEN")]
     auth_token: Option<String>,
+
+    /// Enable the `/v1/simple/*` text endpoints for simple devices (e.g. iPhone Shortcuts),
+    /// protected by this dedicated bearer token. Simple clips are plaintext to the server.
+    #[arg(long, env = "AIRPASTE_SIMPLE_TOKEN")]
+    simple_token: Option<String>,
 }
 
 #[tokio::main]
@@ -27,7 +32,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    airpaste_server::serve(args.bind, &args.db, args.auth_token, shutdown_signal()).await
+    airpaste_server::serve(
+        args.bind,
+        &args.db,
+        args.auth_token,
+        args.simple_token,
+        shutdown_signal(),
+    )
+    .await
 }
 
 async fn shutdown_signal() {

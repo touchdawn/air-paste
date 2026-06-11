@@ -79,7 +79,11 @@ fn show(ctx: &egui::Context, toast: &airpaste_agent::Toast) {
             .with_position(position),
         move |ctx, _class| {
             let fill = egui::Color32::from_rgba_unmultiplied(0x1d, 0x1e, 0x21, 235);
-            let accent = if is_error { theme::DANGER } else { theme::SUCCESS };
+            let accent = if is_error {
+                theme::DANGER
+            } else {
+                theme::SUCCESS
+            };
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()

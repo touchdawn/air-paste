@@ -21,18 +21,21 @@ pub struct ServerController {
     runtime: tokio::runtime::Handle,
     bind: SocketAddr,
     db: PathBuf,
+    // Token enabling the embedded server's /v1/simple/* endpoints (None keeps them disabled).
+    simple_token: Option<String>,
     status: Arc<Mutex<ServerStatus>>,
     shutdown: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl ServerController {
-    pub fn new(runtime: tokio::runtime::Handle) -> Self {
+    pub fn new(runtime: tokio::runtime::Handle, simple_token: Option<String>) -> Self {
         let bind: SocketAddr = "0.0.0.0:14444".parse().expect("valid default bind");
         let db = airpaste_agent::app_support_dir().join("server.redb");
         Self {
             runtime,
             bind,
             db,
+            simple_token: simple_token.filter(|token| !token.trim().is_empty()),
             status: Arc::new(Mutex::new(ServerStatus::Off)),
             shutdown: Arc::new(Mutex::new(None)),
         }
@@ -62,8 +65,9 @@ impl ServerController {
         let status = self.status.clone();
         let db = self.db.clone();
         let bind = self.bind;
+        let simple_token = self.simple_token.clone();
         self.runtime.spawn(async move {
-            let result = airpaste_server::serve(bind, &db, None, async move {
+            let result = airpaste_server::serve(bind, &db, None, simple_token, async move {
                 let _ = rx.await;
             })
             .await;

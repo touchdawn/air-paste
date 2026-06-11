@@ -49,6 +49,8 @@ pub fn run() -> eframe::Result<()> {
     if args.auth_token.is_none() {
         args.auth_token = config.auth_token.clone().filter(|t| !t.is_empty());
     }
+    // An explicit --simple-mirror=true (or env) wins; otherwise the saved checkbox applies.
+    args.simple_mirror = args.simple_mirror || config.simple_mirror;
 
     // Snapshot the values the settings panel needs before `args` is moved into the agent.
     let settings = Settings {
@@ -56,9 +58,12 @@ pub fn run() -> eframe::Result<()> {
         server_url: args.server_url.clone(),
         auth_token: args.auth_token.clone().unwrap_or_default(),
         pair_code: args.pair_code.clone().unwrap_or_default(),
+        simple_token: config.simple_token.clone().unwrap_or_default(),
+        simple_mirror: args.simple_mirror,
     };
 
     let run_server = config.run_server;
+    let simple_token = config.simple_token.clone();
 
     // eframe owns the main thread, so the Tokio runtime + agent live on a background thread.
     let (tx, rx) = mpsc::channel();
@@ -76,7 +81,7 @@ pub fn run() -> eframe::Result<()> {
                 }
             };
             rt.block_on(async move {
-                let server = ServerController::new(tokio::runtime::Handle::current());
+                let server = ServerController::new(tokio::runtime::Handle::current(), simple_token);
                 // Start the embedded server BEFORE the agent and wait for it to listen, so an
                 // agent pointed at localhost does not race the bind (it does not retry register).
                 if run_server {
@@ -117,6 +122,8 @@ struct Settings {
     server_url: String,
     auth_token: String,
     pair_code: String,
+    simple_token: String,
+    simple_mirror: bool,
 }
 
 pub(crate) struct TrayApp {
@@ -134,6 +141,10 @@ pub(crate) struct TrayApp {
     pub(crate) server_url_input: String,
     pub(crate) auth_token_input: String,
     pub(crate) pair_code_input: String,
+    // Simple-device access (e.g. iPhone Shortcuts): embedded-server token + mirror toggle.
+    // Both apply on save-and-relaunch like the connection settings.
+    pub(crate) simple_token_input: String,
+    pub(crate) simple_mirror_input: bool,
     // Once connected, the one-shot pair code is cleared from the saved config (reusing a
     // consumed code is a hard error on the next connect). Done once per launch.
     pair_code_cleared: bool,
@@ -228,6 +239,8 @@ impl TrayApp {
             server_url_input: settings.server_url,
             auth_token_input: settings.auth_token,
             pair_code_input: settings.pair_code,
+            simple_token_input: settings.simple_token,
+            simple_mirror_input: settings.simple_mirror,
             pair_code_cleared: false,
             autostart: crate::autostart::is_autostart_enabled(),
             server,
@@ -300,6 +313,9 @@ impl TrayApp {
             Some(self.auth_token_input.trim().to_string()).filter(|t: &String| !t.is_empty());
         config.pair_code =
             Some(self.pair_code_input.trim().to_string()).filter(|c: &String| !c.is_empty());
+        config.simple_token =
+            Some(self.simple_token_input.trim().to_string()).filter(|t: &String| !t.is_empty());
+        config.simple_mirror = self.simple_mirror_input;
         config.last_server_url = Some(server_url);
         if let Err(error) = config.save() {
             eprintln!("airpaste-tray: failed to save config: {error}");

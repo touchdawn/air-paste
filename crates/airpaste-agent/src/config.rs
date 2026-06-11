@@ -184,6 +184,18 @@ pub struct Args {
         default_value_t = ClipboardMode::System
     )]
     pub clipboard_mode: ClipboardMode,
+
+    /// Mirror explicitly sent text (Alt+C / the tray send button) as plaintext into the
+    /// server's simple-device inbox, so clients without device signing or E2E crypto (e.g.
+    /// iPhone Shortcuts) can read it. Requires the server to run with --simple-token.
+    /// Auto-published clipboard changes (system mode) are never mirrored.
+    #[arg(
+        long,
+        env = "AIRPASTE_SIMPLE_MIRROR",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub simple_mirror: bool,
 }
 
 impl Args {

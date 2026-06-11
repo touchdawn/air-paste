@@ -118,11 +118,33 @@ pub struct CreateClipRequest {
     pub expires_at: Option<Timestamp>,
     pub kind: ClipKind,
     pub encryption: EncryptionInfo,
+    /// Plaintext copy of an explicitly-sent text clip, destined for the server's simple-device
+    /// inbox (clients that cannot do device signing or E2E crypto, e.g. iPhone Shortcuts).
+    /// Honored only when the server runs with a simple token; never stored in the clip record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simple_mirror_text: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateClipResponse {
     pub clip_id: ClipId,
+    pub created_at: Timestamp,
+}
+
+/// `POST /v1/simple/clips` request body: a plaintext text clip from a simple device.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SimpleClipUpload {
+    pub text: String,
+    /// Display name for the sending device, e.g. "iPhone". Optional.
+    #[serde(default)]
+    pub device_name: Option<String>,
+}
+
+/// `GET /v1/simple/clips/latest` response body (`null` when nothing is available).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SimpleClipLatest {
+    pub text: String,
+    pub source: String,
     pub created_at: Timestamp,
 }
 

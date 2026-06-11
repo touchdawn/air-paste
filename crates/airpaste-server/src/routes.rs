@@ -4,15 +4,18 @@ use crate::{
     store::StoreError,
     ws::ws_handler,
 };
-use airpaste_core::{now, ClipId, ClipRecord, Device, DeviceId, SessionId};
+use airpaste_core::{
+    now, BlobRef, ClipId, ClipKind, ClipRecord, Device, DeviceId, EncryptionInfo, SessionId,
+    TextClip,
+};
 use airpaste_protocol::{
     rest_body_sha256_base64url, rest_signing_message, ClipSummary, ConfirmPairingRequest,
     ConfirmPairingResponse, CreateClipRequest, CreateClipResponse, CreateRelaySessionRequest,
     CreateRelaySessionResponse, HealthResponse, RegisterDeviceRequest, RegisterDeviceResponse,
-    ServerEvent, StartPairingRequest, StartPairingResponse, TrustDeviceResponse,
-    AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER, AIRPASTE_NONCE_HEADER,
-    AIRPASTE_REST_SIGNATURE_ALG, AIRPASTE_SIGNATURE_ALG_HEADER, AIRPASTE_SIGNATURE_HEADER,
-    AIRPASTE_TIMESTAMP_HEADER,
+    ServerEvent, SimpleClipLatest, SimpleClipUpload, StartPairingRequest, StartPairingResponse,
+    TrustDeviceResponse, AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER,
+    AIRPASTE_NONCE_HEADER, AIRPASTE_REST_SIGNATURE_ALG, AIRPASTE_SIGNATURE_ALG_HEADER,
+    AIRPASTE_SIGNATURE_HEADER, AIRPASTE_TIMESTAMP_HEADER,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -31,6 +34,14 @@ use std::{sync::Arc, time::Duration};
 
 const MAX_SIGNED_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REST_SIGNATURE_SKEW: Duration = Duration::from_secs(300);
+/// Upper bound for text accepted from / mirrored to simple devices (matches the agent's default
+/// `--max-text-clip-bytes`).
+const MAX_SIMPLE_TEXT_BYTES: usize = 128 * 1024;
+/// Server-side TTL for clips uploaded by simple devices (same as the agent's text default).
+const SIMPLE_CLIP_TTL_SECS: i64 = 600;
+/// Scheme marker for plaintext clips minted on behalf of simple devices; anything other than the
+/// E2E scheme takes the agents' legacy-plaintext apply path.
+const SIMPLE_PLAINTEXT_SCHEME: &str = "plaintext-simple-v1";
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -47,6 +58,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/relay/sessions", post(create_relay_session))
         .route("/v1/relay/:session_id/ws", get(relay_ws_upgrade))
         .route("/v1/ws", get(ws_upgrade))
+        .route("/v1/simple/clips", post(simple_create_clip))
+        .route("/v1/simple/clips/latest", get(simple_latest_clip))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state)
 }
@@ -164,10 +177,104 @@ async fn create_clip(
         source_device_id: clip.source_device_id.clone(),
         kind,
     });
+
+    // An explicitly-sent text clip may carry a plaintext copy for simple devices. The plaintext
+    // only lives in the in-memory simple inbox — never in the database — and is dropped
+    // silently when simple access is disabled or the copy is oversized.
+    if let Some(text) = request.simple_mirror_text {
+        if state.simple_token.is_some() && text.len() <= MAX_SIMPLE_TEXT_BYTES {
+            state
+                .set_simple_inbox(crate::state::SimpleInboxEntry {
+                    text,
+                    source: request_device.name.clone(),
+                    created_at: clip.created_at,
+                    expires_at: clip.expires_at,
+                })
+                .await;
+        }
+    }
+
     Ok(Json(CreateClipResponse {
         clip_id: clip.clip_id,
         created_at: clip.created_at,
     }))
+}
+
+/// `POST /v1/simple/clips`: a plaintext text clip from a simple device (e.g. iPhone Shortcuts).
+/// Stored as a regular plaintext clip so desktop agents receive it through the normal
+/// notify/apply path, and kept in the simple inbox so other simple devices can read it back.
+async fn simple_create_clip(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SimpleClipUpload>,
+) -> ApiResult<Json<CreateClipResponse>> {
+    let text = request.text;
+    if text.trim().is_empty() {
+        return Err(ApiError::bad_request("text must not be empty"));
+    }
+    if text.len() > MAX_SIMPLE_TEXT_BYTES {
+        return Err(ApiError::bad_request("text too large"));
+    }
+    let source = request
+        .device_name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "simple-device".to_string());
+
+    let clip = ClipRecord {
+        clip_id: ClipId::new(),
+        source_device_id: DeviceId::from(format!("simple:{source}")),
+        created_at: now(),
+        expires_at: Some(now() + chrono::Duration::seconds(SIMPLE_CLIP_TTL_SECS)),
+        kind: ClipKind::Text(TextClip {
+            utf8_len: text.len() as u64,
+            preview: None,
+            encrypted_body_ref: BlobRef {
+                id: SIMPLE_PLAINTEXT_SCHEME.to_string(),
+                byte_len: text.len() as u64,
+            },
+            encrypted_inline_body: Some(text.clone()),
+        }),
+        encryption: EncryptionInfo {
+            scheme: SIMPLE_PLAINTEXT_SCHEME.to_string(),
+            key_wrapped_for: Vec::new(),
+            wrapped_keys: Vec::new(),
+            body_nonce: None,
+        },
+    };
+    let kind = clip.kind.name().to_string();
+    let clip = state.store.create_clip(clip).map_err(ApiError::from)?;
+    state.hub.broadcast(ServerEvent::ClipCreated {
+        clip_id: clip.clip_id.clone(),
+        source_device_id: clip.source_device_id.clone(),
+        kind,
+    });
+    state
+        .set_simple_inbox(crate::state::SimpleInboxEntry {
+            text,
+            source,
+            created_at: clip.created_at,
+            expires_at: clip.expires_at,
+        })
+        .await;
+    Ok(Json(CreateClipResponse {
+        clip_id: clip.clip_id,
+        created_at: clip.created_at,
+    }))
+}
+
+/// `GET /v1/simple/clips/latest`: the most recent text visible to simple devices — either
+/// mirrored from an explicit desktop send or uploaded by another simple device. `null` when
+/// nothing is available (or the entry expired / the server restarted).
+async fn simple_latest_clip(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Option<SimpleClipLatest>>> {
+    Ok(Json(state.simple_inbox().await.map(|entry| {
+        SimpleClipLatest {
+            text: entry.text,
+            source: entry.source,
+            created_at: entry.created_at,
+        }
+    })))
 }
 
 async fn get_clip(
@@ -315,6 +422,24 @@ async fn require_auth(
     next: Next,
 ) -> Response {
     if request.uri().path() == "/health" || request.uri().path() == "/v1/health" {
+        return next.run(request).await;
+    }
+
+    // Simple-device endpoints authenticate with their own dedicated bearer token and nothing
+    // else: the main auth token must not open them, and the simple token must not open anything
+    // beyond `/v1/simple/`. Disabled (404) unless the server was started with a simple token.
+    if request.uri().path().starts_with("/v1/simple/") {
+        let Some(expected) = state.simple_token.as_deref() else {
+            return ApiError::not_found("simple access is not enabled").into_response();
+        };
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|actual| constant_time_eq(actual.as_bytes(), expected.as_bytes()));
+        if !authorized {
+            return ApiError::unauthorized("missing or invalid simple token").into_response();
+        }
         return next.run(request).await;
     }
 
