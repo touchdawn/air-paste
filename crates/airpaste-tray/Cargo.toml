@@ -6,8 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 # Cross-platform menu-bar / tray UI. The egui stack + embedded agent build on both macOS and
-# Windows; verified to cross-compile to x86_64-pc-windows-gnu (eframe's default glow/OpenGL
-# backend links fine under mingw-w64).
+# Windows; verified to cross-compile to x86_64-pc-windows-gnu (the glow/OpenGL backend pinned
+# in the workspace manifest links fine under mingw-w64; eframe 0.34's default wgpu does not).
 [dependencies]
 airpaste-agent = { path = "../airpaste-agent" }
 airpaste-server = { path = "../airpaste-server" }
