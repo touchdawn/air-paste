@@ -80,7 +80,7 @@ iPhone 通过两个快捷指令调用服务器的简单设备文本接口（`/v1
 2. 桌面端勾选「镜像给简单设备」（或 `--simple-mirror=true`）：按 `Option+C` / `Alt+C` 显式发送的文本会额外镜像一份明文到服务器内存，供 iPhone 拉取；自动发布的剪贴板变化永远不镜像。
 3. iPhone 上建两个快捷指令：「发送剪贴板」（获取剪贴板 → POST `/v1/simple/clips`）和「接收剪贴板」（GET `/v1/simple/clips/latest` → 拷贝到剪贴板），绑到轻点背面后体验接近手机版 `Option+C` / `Option+V`。
 
-注意：这条通道的内容对服务器是明文（端到端加密降级为传输加密），所以只镜像显式发送的内容，且明文只在服务器内存中保留至多 10 分钟；外网访问请走 HTTPS 反向代理。详细步骤见 [docs/IOS_SHORTCUTS.md](docs/IOS_SHORTCUTS.md)。
+加密边界：iPhone 上传的文本到达服务器后会**立即为所有受信任设备端到端封装**，落库和发往桌面端的都是密文；明文只存在于 iPhone↔服务器的 HTTPS 段和服务器内存的 simple 收件箱（至多 10 分钟，不落盘）。镜像方向的明文副本随发布请求发出，所以只在与服务器同机或走可信链路的设备上开启镜像。详细步骤见 [docs/IOS_SHORTCUTS.md](docs/IOS_SHORTCUTS.md)。
 
 ## 编译
 

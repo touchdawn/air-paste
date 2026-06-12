@@ -105,7 +105,11 @@ impl HotkeySpec {
             });
         }
         if self.meta {
-            parts.push(if cfg!(target_os = "macos") { "Cmd" } else { "Win" });
+            parts.push(if cfg!(target_os = "macos") {
+                "Cmd"
+            } else {
+                "Win"
+            });
         }
         let key = match self.key {
             HotkeyKey::Char(c) => (c as char).to_string(),

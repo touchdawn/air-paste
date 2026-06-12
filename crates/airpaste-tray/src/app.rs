@@ -361,7 +361,10 @@ impl TrayApp {
             Ok(spec) => spec,
             Err(error) => return Some(format!("发送热键无效:{error}")),
         };
-        let paste = match parse(&self.hotkey_paste_input, airpaste_agent::DEFAULT_PASTE_HOTKEY) {
+        let paste = match parse(
+            &self.hotkey_paste_input,
+            airpaste_agent::DEFAULT_PASTE_HOTKEY,
+        ) {
             Ok(spec) => spec,
             Err(error) => return Some(format!("粘贴热键无效:{error}")),
         };

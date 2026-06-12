@@ -13,10 +13,9 @@ use airpaste_protocol::{
     ConfirmPairingResponse, CreateClipRequest, CreateClipResponse, CreateRelaySessionRequest,
     CreateRelaySessionResponse, HealthResponse, RegisterDeviceRequest, RegisterDeviceResponse,
     RenameDeviceRequest, RenameDeviceResponse, ServerEvent, SimpleClipLatest, SimpleClipUpload,
-    StartPairingRequest, StartPairingResponse,
-    TrustDeviceResponse, AIRPASTE_BODY_SHA256_HEADER, AIRPASTE_DEVICE_ID_HEADER,
-    AIRPASTE_NONCE_HEADER, AIRPASTE_REST_SIGNATURE_ALG, AIRPASTE_SIGNATURE_ALG_HEADER,
-    AIRPASTE_SIGNATURE_HEADER, AIRPASTE_TIMESTAMP_HEADER,
+    StartPairingRequest, StartPairingResponse, TrustDeviceResponse, AIRPASTE_BODY_SHA256_HEADER,
+    AIRPASTE_DEVICE_ID_HEADER, AIRPASTE_NONCE_HEADER, AIRPASTE_REST_SIGNATURE_ALG,
+    AIRPASTE_SIGNATURE_ALG_HEADER, AIRPASTE_SIGNATURE_HEADER, AIRPASTE_TIMESTAMP_HEADER,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -232,8 +231,11 @@ async fn create_clip(
 }
 
 /// `POST /v1/simple/clips`: a plaintext text clip from a simple device (e.g. iPhone Shortcuts).
-/// Stored as a regular plaintext clip so desktop agents receive it through the normal
-/// notify/apply path, and kept in the simple inbox so other simple devices can read it back.
+/// The server immediately seals the text end-to-end for every trusted device (it already holds
+/// their X25519 public keys), so what gets stored and broadcast is a regular encrypted clip —
+/// agents on plain-HTTP links never see simple uploads in cleartext. The plaintext survives
+/// only in the in-memory simple inbox (for other simple devices) and falls back to a legacy
+/// plaintext clip only when no trusted device has an encryption key yet.
 async fn simple_create_clip(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SimpleClipUpload>,
@@ -251,26 +253,75 @@ async fn simple_create_clip(
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "simple-device".to_string());
 
+    let recipients: Vec<airpaste_crypto::Recipient> = state
+        .store
+        .list_devices()
+        .map_err(ApiError::from)?
+        .into_iter()
+        .filter(|device| device.trusted && !device.encryption_public_key.trim().is_empty())
+        .map(|device| airpaste_crypto::Recipient {
+            device_id: device.device_id,
+            public_key_base64: device.encryption_public_key,
+        })
+        .collect();
+
+    let (kind, encryption) = if recipients.is_empty() {
+        tracing::warn!(
+            "no trusted device has an encryption key; storing simple upload as plaintext"
+        );
+        (
+            ClipKind::Text(TextClip {
+                utf8_len: text.len() as u64,
+                preview: None,
+                encrypted_body_ref: BlobRef {
+                    id: SIMPLE_PLAINTEXT_SCHEME.to_string(),
+                    byte_len: text.len() as u64,
+                },
+                encrypted_inline_body: Some(text.clone()),
+            }),
+            EncryptionInfo {
+                scheme: SIMPLE_PLAINTEXT_SCHEME.to_string(),
+                key_wrapped_for: Vec::new(),
+                wrapped_keys: Vec::new(),
+                body_nonce: None,
+            },
+        )
+    } else {
+        let sealed = airpaste_crypto::seal_text(&text, &recipients).map_err(|error| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("failed to seal simple clip: {error}"),
+        })?;
+        let key_wrapped_for = sealed
+            .wrapped_keys
+            .iter()
+            .map(|wrapped| wrapped.device_id.clone())
+            .collect();
+        (
+            ClipKind::Text(TextClip {
+                utf8_len: text.len() as u64,
+                preview: None,
+                encrypted_body_ref: BlobRef {
+                    id: airpaste_crypto::TEXT_ENCRYPTION_SCHEME.to_string(),
+                    byte_len: sealed.body_ciphertext_base64.len() as u64,
+                },
+                encrypted_inline_body: Some(sealed.body_ciphertext_base64),
+            }),
+            EncryptionInfo {
+                scheme: airpaste_crypto::TEXT_ENCRYPTION_SCHEME.to_string(),
+                key_wrapped_for,
+                wrapped_keys: sealed.wrapped_keys,
+                body_nonce: Some(sealed.body_nonce_base64),
+            },
+        )
+    };
+
     let clip = ClipRecord {
         clip_id: ClipId::new(),
         source_device_id: DeviceId::from(format!("simple:{source}")),
         created_at: now(),
         expires_at: Some(now() + chrono::Duration::seconds(SIMPLE_CLIP_TTL_SECS)),
-        kind: ClipKind::Text(TextClip {
-            utf8_len: text.len() as u64,
-            preview: None,
-            encrypted_body_ref: BlobRef {
-                id: SIMPLE_PLAINTEXT_SCHEME.to_string(),
-                byte_len: text.len() as u64,
-            },
-            encrypted_inline_body: Some(text.clone()),
-        }),
-        encryption: EncryptionInfo {
-            scheme: SIMPLE_PLAINTEXT_SCHEME.to_string(),
-            key_wrapped_for: Vec::new(),
-            wrapped_keys: Vec::new(),
-            body_nonce: None,
-        },
+        kind,
+        encryption,
     };
     let kind = clip.kind.name().to_string();
     let clip = state.store.create_clip(clip).map_err(ApiError::from)?;

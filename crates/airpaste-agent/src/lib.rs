@@ -831,7 +831,9 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
         );
     }
     let device_name = args.device_name();
-    let hotkey_chords = args.hotkey_chords().context("invalid hotkey configuration")?;
+    let hotkey_chords = args
+        .hotkey_chords()
+        .context("invalid hotkey configuration")?;
     let cache_dir = args.cache_dir();
     let state_file = StateFile::new(state_path);
     let mut state = state_file.load()?;
@@ -887,10 +889,7 @@ async fn run(args: Args, shared: Arc<AgentShared>) -> anyhow::Result<()> {
     // it. Failure is not fatal — an untrusted device cannot rename itself yet, so this retries
     // on the next launch.
     if state.device_name.as_deref() != Some(device_name.as_str()) {
-        match client
-            .rename_device(&device_id, device_name.clone())
-            .await
-        {
+        match client.rename_device(&device_id, device_name.clone()).await {
             Ok(_) => {
                 tracing::info!(name = %device_name, "device name synced to server");
                 state.device_name = Some(device_name.clone());

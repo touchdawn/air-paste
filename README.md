@@ -82,7 +82,7 @@ An iPhone joins through two Shortcuts that call the server's simple-device text 
 2. Enable mirroring on the desktop ("镜像给简单设备" in the tray, or `--simple-mirror=true`): text you explicitly send with `Option+C` / `Alt+C` is additionally mirrored as plaintext into server memory for the iPhone to fetch; auto-published clipboard changes are never mirrored.
 3. Create two Shortcuts on the iPhone: "Send clipboard" (Get Clipboard → POST `/v1/simple/clips`) and "Receive clipboard" (GET `/v1/simple/clips/latest` → Copy to Clipboard). Bound to Back Tap, they feel like a phone-side `Option+C` / `Option+V`.
 
-Note: this channel is plaintext to the server (E2E encryption degrades to transport encryption), which is why only explicit sends are mirrored, and the plaintext lives in server memory for at most 10 minutes. Use an HTTPS reverse proxy outside trusted LANs. Full setup guide: [docs/IOS_SHORTCUTS.md](docs/IOS_SHORTCUTS.md) (Chinese).
+Encryption boundary: text uploaded from the iPhone is **sealed end-to-end for every trusted device the moment it reaches the server**, so what gets stored and broadcast to desktops is ciphertext; plaintext exists only on the iPhone↔server HTTPS leg and in the server's in-memory simple inbox (at most 10 minutes, never on disk). The mirror copy travels in plaintext with the publish request, so enable mirroring only on devices that reach the server over localhost or a trusted link. Full setup guide: [docs/IOS_SHORTCUTS.md](docs/IOS_SHORTCUTS.md) (Chinese).
 
 ## Building
 
