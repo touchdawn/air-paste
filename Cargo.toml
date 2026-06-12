@@ -57,3 +57,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-tungstenite = "0.24"
 windows-sys = "0.61"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# eframe 0.34.3 with panic-free GL handling (vendor/eframe-0.34.3, only
+# src/native/glow_integration.rs changed, sites marked [PATCHED]): upstream `.unwrap()`s the
+# glutin make-current calls and exits the app on swap_buffers errors, so a transient GL
+# failure — lock screen, display sleep, GPU reset, RDP session switch — killed the tray app.
+# That was the Alt+C/V "random crash": the hotkey toast HUD opens a second GL viewport, and
+# the context switch it forces is exactly the fragile path. Patched to log, skip the frame,
+# and retry instead. Revisit when upstream fixes https://github.com/emilk/egui/issues/4173.
+[patch.crates-io]
+eframe = { path = "vendor/eframe-0.34.3" }
