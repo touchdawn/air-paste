@@ -778,6 +778,36 @@ pub fn init_tracing() {
     }
 }
 
+/// Install a process-wide panic hook that appends the panic message and a backtrace to
+/// `<app support>/agent.log` before the default hook runs. A panic unwinds and exits the
+/// process without a macOS crash report or Windows WER entry, and a bundled GUI app has no
+/// visible stderr — without this, a panic reads as the app silently vanishing.
+pub fn install_panic_logger() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let thread = std::thread::current();
+        let message = format!(
+            "{} PANIC thread={} {info}\nbacktrace:\n{backtrace}\n",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ"),
+            thread.name().unwrap_or("<unnamed>"),
+        );
+        // Write straight to the file: the process is about to die, so this must not rely on
+        // tracing (whose file layer shares a lock a panicking thread might already hold).
+        let path = app_support_dir().join("agent.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write as _;
+            let _ = file.write_all(message.as_bytes());
+            let _ = file.flush();
+        }
+        previous(info);
+    }));
+}
+
 /// Parse agent arguments from the process command line (so embedders need no `clap` dep).
 pub fn parse_args() -> Args {
     Args::parse()
@@ -786,6 +816,7 @@ pub fn parse_args() -> Args {
 /// CLI entry point: initialize tracing, parse args, and run to completion.
 pub async fn run_cli() -> anyhow::Result<()> {
     init_tracing();
+    install_panic_logger();
     let args = Args::parse();
     let shared = Arc::new(AgentShared::new(&args));
     run(args, shared).await

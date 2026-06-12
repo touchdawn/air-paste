@@ -26,6 +26,7 @@ pub fn run() -> eframe::Result<()> {
         std::env::set_var("AIRPASTE_CLIPBOARD_MODE", "isolated");
     }
     airpaste_agent::init_tracing();
+    airpaste_agent::install_panic_logger();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         commit = env!("AIRPASTE_GIT_HASH"),
