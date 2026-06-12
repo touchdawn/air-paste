@@ -164,6 +164,8 @@ pub(crate) struct TrayApp {
     // Custom hotkey chords; empty means "use the defaults" (Alt+C / Alt+V).
     pub(crate) hotkey_copy_input: String,
     pub(crate) hotkey_paste_input: String,
+    // Which hotkey field (if any) is currently capturing a chord from the keyboard.
+    pub(crate) hotkey_recording: Option<HotkeyField>,
     // Simple-device access (e.g. iPhone Shortcuts): embedded-server token + mirror toggle.
     // Both apply on save-and-relaunch like the connection settings.
     pub(crate) simple_token_input: String,
@@ -185,6 +187,13 @@ pub(crate) struct TrayApp {
     pub(crate) pasted_image_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     // Hotkey-feedback HUD currently on screen (see `ui::toast`).
     pub(crate) toast: Option<ui::toast::ActiveToast>,
+}
+
+/// The two hotkey settings fields, for tracking which one is recording a chord.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HotkeyField {
+    Copy,
+    Paste,
 }
 
 /// A clipboard bitmap staged on the send tab: the raw pixels for the eventual PNG encode plus
@@ -281,6 +290,7 @@ impl TrayApp {
             device_name_input: settings.device_name,
             hotkey_copy_input: settings.hotkey_copy,
             hotkey_paste_input: settings.hotkey_paste,
+            hotkey_recording: None,
             simple_token_input: settings.simple_token,
             simple_mirror_input: settings.simple_mirror,
             pair_code_cleared: false,

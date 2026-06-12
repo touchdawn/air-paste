@@ -3,7 +3,7 @@
 
 use eframe::egui;
 
-use crate::app::TrayApp;
+use crate::app::{HotkeyField, TrayApp};
 use crate::config::TrayConfig;
 use crate::server::ServerStatus;
 use crate::theme;
@@ -44,33 +44,10 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
         );
     });
     form_row(ui, "发送热键", |ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut app.hotkey_copy_input)
-                .desired_width(f32::INFINITY)
-                .hint_text(format!(
-                    "留空使用默认:{}",
-                    airpaste_agent::HotkeySpec::parse(airpaste_agent::DEFAULT_COPY_HOTKEY)
-                        .map(|s| s.label())
-                        .unwrap_or_default()
-                )),
-        )
-        .on_hover_text(
-            "把当前剪贴板发送到 AirPaste 的全局热键。格式如 alt+c、ctrl+shift+f9,\
-             修饰键可用 alt/option、ctrl、shift、cmd/win。保存并连接后生效。",
-        );
+        hotkey_recorder(app, ui, HotkeyField::Copy);
     });
     form_row(ui, "粘贴热键", |ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut app.hotkey_paste_input)
-                .desired_width(f32::INFINITY)
-                .hint_text(format!(
-                    "留空使用默认:{}",
-                    airpaste_agent::HotkeySpec::parse(airpaste_agent::DEFAULT_PASTE_HOTKEY)
-                        .map(|s| s.label())
-                        .unwrap_or_default()
-                )),
-        )
-        .on_hover_text("从 AirPaste 粘贴远端内容的全局热键,格式同上。保存并连接后生效。");
+        hotkey_recorder(app, ui, HotkeyField::Paste);
     });
     form_row(ui, "简单设备令牌", |ui| {
         ui.add(
@@ -167,4 +144,164 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+/// Click-to-record hotkey field: click the chord button, press the new combination (Esc or a
+/// click elsewhere cancels), and the captured chord lands in the config string. "重置" clears
+/// back to empty, i.e. the default chord.
+fn hotkey_recorder(app: &mut TrayApp, ui: &mut egui::Ui, field: HotkeyField) {
+    let (default_spec, hover) = match field {
+        HotkeyField::Copy => (
+            airpaste_agent::DEFAULT_COPY_HOTKEY,
+            "把当前剪贴板发送到 AirPaste 的全局热键。点击后按下新组合键:至少一个修饰键\
+             (Ctrl/Shift/Option/Cmd)加一个字母、数字或 F1–F12,Esc 取消。\
+             当前正在生效的热键会被系统拦截,录不进来。保存并连接后生效。",
+        ),
+        HotkeyField::Paste => (
+            airpaste_agent::DEFAULT_PASTE_HOTKEY,
+            "从 AirPaste 粘贴远端内容的全局热键,录制方式同发送热键。保存并连接后生效。",
+        ),
+    };
+
+    // Capture before drawing so the frame that catches the chord already shows the result.
+    if app.hotkey_recording == Some(field) {
+        match ui.input(capture_chord) {
+            ChordCapture::Pending => {}
+            ChordCapture::Cancelled => app.hotkey_recording = None,
+            ChordCapture::Chord(spec) => {
+                match field {
+                    HotkeyField::Copy => app.hotkey_copy_input = spec,
+                    HotkeyField::Paste => app.hotkey_paste_input = spec,
+                }
+                app.hotkey_recording = None;
+            }
+        }
+    }
+
+    let recording = app.hotkey_recording == Some(field);
+    let current = match field {
+        HotkeyField::Copy => app.hotkey_copy_input.trim(),
+        HotkeyField::Paste => app.hotkey_paste_input.trim(),
+    }
+    .to_string();
+
+    let text = if recording {
+        let held = held_modifier_label(ui.input(|i| i.modifiers));
+        if held.is_empty() {
+            "按下组合键…(Esc 取消)".to_string()
+        } else {
+            format!("{held}+…")
+        }
+    } else if current.is_empty() {
+        format!("默认:{}", chord_label(default_spec))
+    } else {
+        chord_label(&current)
+    };
+
+    let mut rich = egui::RichText::new(text);
+    if recording {
+        rich = rich.color(theme::ACCENT);
+    } else if current.is_empty() {
+        rich = rich.color(ui.visuals().weak_text_color());
+    }
+    let mut button = egui::Button::new(rich);
+    if recording {
+        button = button.stroke(egui::Stroke::new(1.0, theme::ACCENT));
+    }
+    let reset_width = 56.0;
+    let chord_width = (ui.available_width() - reset_width - ui.spacing().item_spacing.x).max(0.0);
+    let response = ui
+        .add_sized([chord_width, ui.spacing().interact_size.y], button)
+        .on_hover_text(hover);
+    if response.clicked() {
+        app.hotkey_recording = if recording { None } else { Some(field) };
+        // Drop focus so Space/Enter during recording aren't treated as another button click.
+        response.surrender_focus();
+    } else if recording && response.clicked_elsewhere() {
+        app.hotkey_recording = None;
+    }
+
+    if ui
+        .add_enabled(!current.is_empty(), egui::Button::new("重置"))
+        .on_hover_text("恢复默认热键")
+        .clicked()
+    {
+        match field {
+            HotkeyField::Copy => app.hotkey_copy_input.clear(),
+            HotkeyField::Paste => app.hotkey_paste_input.clear(),
+        }
+    }
+}
+
+enum ChordCapture {
+    Pending,
+    Cancelled,
+    Chord(String),
+}
+
+/// Scan this frame's key presses for a recordable chord. Esc cancels; presses that can't form a
+/// valid global hotkey (no modifier, unsupported key) are ignored so recording continues.
+fn capture_chord(input: &egui::InputState) -> ChordCapture {
+    for event in &input.events {
+        if let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        {
+            if *key == egui::Key::Escape {
+                return ChordCapture::Cancelled;
+            }
+            // Build the config-format spec ("ctrl+shift+f9"); HotkeySpec::parse stays the
+            // single source of truth for what's allowed.
+            let mut spec = String::new();
+            for (held, name) in [
+                (modifiers.ctrl, "ctrl"),
+                (modifiers.shift, "shift"),
+                (modifiers.alt, "alt"),
+                (modifiers.mac_cmd, "cmd"),
+            ] {
+                if held {
+                    spec.push_str(name);
+                    spec.push('+');
+                }
+            }
+            spec.push_str(&key.name().to_ascii_lowercase());
+            if airpaste_agent::HotkeySpec::parse(&spec).is_ok() {
+                return ChordCapture::Chord(spec);
+            }
+        }
+    }
+    ChordCapture::Pending
+}
+
+/// Platform label ("Option+C") for a stored chord string, falling back to the raw string.
+fn chord_label(spec: &str) -> String {
+    airpaste_agent::HotkeySpec::parse(spec)
+        .map(|s| s.label())
+        .unwrap_or_else(|_| spec.to_string())
+}
+
+/// Live "Ctrl+Shift" preview of the held modifiers while recording, in `HotkeySpec::label`
+/// order and platform names.
+fn held_modifier_label(modifiers: egui::Modifiers) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if modifiers.ctrl {
+        parts.push("Ctrl");
+    }
+    if modifiers.shift {
+        parts.push("Shift");
+    }
+    if modifiers.alt {
+        parts.push(if cfg!(target_os = "macos") {
+            "Option"
+        } else {
+            "Alt"
+        });
+    }
+    if modifiers.mac_cmd {
+        parts.push("Cmd");
+    }
+    parts.join("+")
 }
