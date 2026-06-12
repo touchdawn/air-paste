@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Air Paste is a Rust-based shared clipboard for Windows and macOS: copy text or files on device A, press a hotkey on device B, and it pastes there. Text is end-to-end encrypted; files transfer peer-to-peer on the LAN (with an encrypted server relay as fallback), and the server never stores file contents.
+Air Paste is a Rust-based cross-device shared clipboard: copy text or files on device A, press a hotkey on device B, and it pastes there. Supports **Windows, macOS**, and **iPhone** via Shortcuts (text send/receive, no app required). Text is end-to-end encrypted; files transfer peer-to-peer on the LAN (with an encrypted server relay as fallback), and the server never stores file contents.
 
 ## How it works in daily use
 
@@ -11,6 +11,7 @@ Run the tray app (`airpaste-tray`, menu bar on macOS / system tray on Windows) o
 - **Send**: copy something normally (`Cmd+C` / `Ctrl+C`), then press **`Option+C`** (macOS) / **`Alt+C`** (Windows) to publish it to your other devices.
 - **Receive**: focus the target app and press **`Option+V`** / **`Alt+V`** — the latest text is pasted, or the latest pending files are downloaded and pasted.
 - No hotkeys needed if you prefer the window: type text and click **Send**, drag files into the window to send, click **Copy**/**Download** on inbox items to receive.
+- **iPhone**: no app needed — two Shortcuts (ideally bound to Back Tap double/triple) upload/download text, like a phone-side `Option+C` / `Option+V`. See "iPhone via Shortcuts" below.
 
 This describes **isolated mode** — the tray app's default and our recommendation; see the next section.
 
