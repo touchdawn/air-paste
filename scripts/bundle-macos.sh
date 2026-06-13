@@ -31,8 +31,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>AirPaste</string>
     <key>CFBundleDisplayName</key><string>AirPaste</string>
     <key>CFBundleIdentifier</key><string>com.airpaste.tray</string>
-    <key>CFBundleVersion</key><string>0.1.0</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>0.1.1</string>
+    <key>CFBundleShortVersionString</key><string>0.1.1</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>AirPaste</string>
     <key>LSMinimumSystemVersion</key><string>10.15</string>

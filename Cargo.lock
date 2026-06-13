@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "airpaste-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "airpaste-core",
  "airpaste-crypto",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "airpaste-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "airpaste-crypto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "airpaste-core",
  "base64",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "airpaste-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "airpaste-core",
  "chrono",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "airpaste-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "airpaste-core",
  "airpaste-crypto",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "airpaste-tray"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "airpaste-agent",
  "airpaste-server",
