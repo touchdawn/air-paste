@@ -10,6 +10,35 @@ use crate::theme;
 use crate::ui::{form_row, form_row_top, hairline, hint, preview, primary_button, status_line};
 
 pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
+    // Pin the save action to the bottom so it stays visible however tall the form gets — the
+    // form overflows the default window height (notably on Windows, where the system font is
+    // taller), which otherwise pushed the button off the bottom edge. The form above scrolls.
+    egui::Panel::bottom("settings_actions")
+        .frame(egui::Frame::NONE)
+        .show_inside(ui, |ui| {
+            hairline(ui);
+            let hotkey_error = app.hotkey_inputs_error();
+            if let Some(error) = &hotkey_error {
+                status_line(ui, theme::DANGER, error);
+            }
+            ui.horizontal(|ui| {
+                hint(ui, "保存后会重启应用以使用新配置");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let can_save =
+                        !app.server_url_input.trim().is_empty() && hotkey_error.is_none();
+                    if primary_button(ui, can_save, "保存并连接").clicked() {
+                        app.save_and_reconnect();
+                    }
+                });
+            });
+        });
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| settings_form(app, ui));
+}
+
+fn settings_form(app: &mut TrayApp, ui: &mut egui::Ui) {
     form_row(ui, "服务器地址", |ui| {
         ui.add(
             egui::TextEdit::singleline(&mut app.server_url_input)
@@ -124,23 +153,6 @@ pub fn show(app: &mut TrayApp, ui: &mut egui::Ui) {
                     );
                 }
                 ServerStatus::Off => {}
-            }
-        });
-    });
-
-    hairline(ui);
-
-    let hotkey_error = app.hotkey_inputs_error();
-    if let Some(error) = &hotkey_error {
-        status_line(ui, theme::DANGER, error);
-    }
-
-    ui.horizontal(|ui| {
-        hint(ui, "保存后会重启应用以使用新配置");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can_save = !app.server_url_input.trim().is_empty() && hotkey_error.is_none();
-            if primary_button(ui, can_save, "保存并连接").clicked() {
-                app.save_and_reconnect();
             }
         });
     });
