@@ -116,6 +116,14 @@ pub fn run() -> eframe::Result<()> {
             .with_inner_size([460.0, 560.0])
             .with_min_inner_size([420.0, 480.0])
             .with_title("AirPaste")
+            // Request a transparent root not because the main window is see-through, but
+            // because glutin picks ONE GL config (from the root's attributes) and every child
+            // viewport reuses it. The toast HUD (`ui::toast`) needs an alpha-capable config to
+            // render its rounded corners without a black box; if the root doesn't ask for
+            // transparency, glow logs "Cannot create transparent window: the GL config does not
+            // support it" and the toast loses its corners. `clear_color` below keeps the main
+            // window itself opaque.
+            .with_transparent(true)
             .with_icon(icon::window_icon()),
         ..Default::default()
     };
@@ -434,6 +442,17 @@ fn relaunch() {
 }
 
 impl eframe::App for TrayApp {
+    /// Clear the root window to the *opaque* panel color. The window is created `transparent`
+    /// only so glutin selects an alpha-capable GL config for the toast HUD to reuse (see the
+    /// viewport builder in `run`) — the main window must stay solid. eframe's default
+    /// `clear_color` is semi-transparent (alpha 180), which would now show the desktop through
+    /// the window; override it with the theme's solid panel fill (forced fully opaque) so the
+    /// background matches the panels in either light/dark theme.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        let [r, g, b, _] = visuals.panel_fill.to_normalized_gamma_f32();
+        [r, g, b, 1.0]
+    }
+
     /// The background tick. eframe 0.34 splits the per-frame callback: `logic` runs before
     /// every `ui` pass AND keeps running while the window is hidden or minimized (`ui` is
     /// skipped for invisible windows — emilk/egui#7950). Everything that must stay alive in
