@@ -943,10 +943,18 @@ impl GlowWinitRunning<'_> {
 /// when the platform refuses — a transient condition around lock screens, display sleep, GPU
 /// resets and RDP session switches. Callers skip the frame and retry on the next one.
 ///
-/// [PATCHED] vs upstream eframe 0.34.3: rebinds via the non-consuming
-/// `PossiblyCurrentGlContext::make_current(&self, …)`, so a failure leaves the context alive
-/// for the retry rather than destroying it (the consuming `NotCurrentContext::make_current`
-/// drops the context on `Err`).
+/// [PATCHED] vs upstream eframe 0.34.3, two changes:
+///  1. Rebind via the non-consuming `PossiblyCurrentGlContext::make_current(&self, …)`, so a
+///     failure leaves the context alive for the retry rather than destroying it (the consuming
+///     `NotCurrentContext::make_current` drops the context on `Err`).
+///  2. Drop the `is_current` fast-path on macOS too (upstream already skips it on Windows).
+///     glutin's CGL `Surface::is_current` does `.expect("context to have a current view")`
+///     (glutin-0.32.3 src/api/cgl/context.rs:304), which PANICS when the context has no
+///     attached NSView — exactly a tray app's state while its window is hidden (closing the
+///     window detaches the view). The hidden→shown repaint and the Alt+C/V toast viewport
+///     both reach this check, so the panic took the whole app down with no crash report. It's
+///     only an optimization; `make_current` re-attaches the view (`setView`) and is panic-free,
+///     so always calling it is correct. Only Linux (x11/wayland) keeps the fast path.
 fn change_gl_context(
     current_gl_context: &mut Option<glutin::context::PossiblyCurrentContext>,
     not_current_gl_context: &mut Option<glutin::context::NotCurrentContext>,
@@ -955,12 +963,8 @@ fn change_gl_context(
     profiling::function_scope!();
 
     if let Some(current) = current_gl_context.as_ref() {
-        if !cfg!(target_os = "windows") {
-            // According to https://github.com/emilk/egui/issues/4289
-            // we cannot do this early-out on Windows.
-            // TODO(emilk): optimize context switching on Windows too.
-            // See https://github.com/emilk/egui/issues/4173
-
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
             profiling::scope!("is_current");
             if gl_surface.is_current(current) {
                 return true; // Early-out to save a lot of time.

@@ -52,3 +52,11 @@ pub fn with_event_loop_context(event_loop: &ActiveEventLoop, f: impl FnOnce()) {
     let _guard = EventLoopGuard::new(event_loop);
     f();
 }
+
+/// Whether an event-loop context is currently established on this thread.
+///
+/// [PATCHED] Added so a caller can establish the context only when it isn't already set —
+/// `with_event_loop_context` asserts no context is active, so nesting it would panic.
+pub fn is_event_loop_context_set() -> bool {
+    CURRENT_EVENT_LOOP.with(|cell| cell.get().is_some())
+}

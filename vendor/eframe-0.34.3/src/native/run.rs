@@ -218,9 +218,27 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         // Paint invisible windows directly, since they won't receive
         // RedrawRequested events on Windows. This ensures that viewport
         // commands like Visible(true) are still processed.
+        //
+        // [PATCHED] Establish the event-loop context around this paint when it isn't already
+        // set. This path is reached from `new_events` (the timer-driven repaint that keeps a
+        // hidden window ticking) WITHOUT a context, unlike the `window_event` path. An
+        // immediate viewport painted here — e.g. AirPaste's Alt+C/V toast HUD, shown while the
+        // tray window is hidden — calls `with_current_event_loop` to create its window; with no
+        // context that returns None, the viewport's window is never built, its ui callback is
+        // never run, and egui panics with "the user callback was never called". Wrapping it
+        // gives `render_immediate_viewport` the event loop it needs. Guarded by
+        // `is_event_loop_context_set` because the other caller (`handle_event_result`) can
+        // already be inside a context, and re-setting it would trip the guard's assert.
         for window_id in &invisible_window_ids {
-            let event_result = self.winit_app.run_ui_and_paint(event_loop, *window_id);
-            self.handle_event_result(event_loop, event_result);
+            if event_loop_context::is_event_loop_context_set() {
+                let event_result = self.winit_app.run_ui_and_paint(event_loop, *window_id);
+                self.handle_event_result(event_loop, event_result);
+            } else {
+                event_loop_context::with_event_loop_context(event_loop, || {
+                    let event_result = self.winit_app.run_ui_and_paint(event_loop, *window_id);
+                    self.handle_event_result(event_loop, event_result);
+                });
+            }
         }
 
         // Throttle any already-scheduled repaints for invisible windows
