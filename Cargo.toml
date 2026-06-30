@@ -11,8 +11,8 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
-repository = "https://example.invalid/air-paste"
+license = "Apache-2.0"
+repository = "https://github.com/touchdawn/air-paste"
 
 [workspace.dependencies]
 anyhow = "1"
