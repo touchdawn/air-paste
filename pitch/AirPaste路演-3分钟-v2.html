@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AirPaste · 3 分钟路演</title>
+<style>
+  :root{
+    --blue:#2e7df6; --blue-deep:#0b3d91; --blue-ink:#16386f;
+    --green:#2eb872; --amber:#d98e2b; --cyan:#179aa6;
+    --ink:#0f1620; --ink2:#1e2732; --muted:#5b6776; --line:#dbe3ee;
+    --bg:#eef2f8; --panel:#ffffff; --soft:#eef4ff; --soft2:#f5f8fd;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;
+    --sans:"PingFang SC","Microsoft YaHei",ui-sans-serif,system-ui,-apple-system,"Segoe UI","Source Han Sans SC",sans-serif;
+    --shadow:0 18px 48px rgba(16,35,60,.14);
+    --shadow-sm:0 6px 18px rgba(16,35,60,.10);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:#0c1320;color:var(--ink);font-family:var(--sans);overflow:hidden;-webkit-font-smoothing:antialiased;line-height:1.5}
+  #stage{position:absolute;top:50%;left:50%;width:1280px;height:720px;transform-origin:center center}
+  .slide{position:absolute;inset:0;display:none;flex-direction:column;background:var(--bg);overflow:hidden;padding:56px 66px 60px}
+  .slide.active{display:flex;animation:fade .45s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+  .kicker{font-size:15px;letter-spacing:.14em;color:var(--blue);font-weight:700;text-transform:uppercase}
+  h1.t{font-size:42px;font-weight:800;color:var(--ink);line-height:1.16;letter-spacing:-.01em;margin-top:4px}
+  .sub{font-size:19px;color:var(--muted);margin-top:8px;font-weight:500}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .stepno{font-family:var(--mono);font-size:120px;font-weight:800;color:#e2e9f4;line-height:.8;position:absolute;right:50px;top:34px;user-select:none;letter-spacing:-.04em}
+  .body{flex:1;display:flex;flex-direction:column;min-height:0;margin-top:22px}
+
+  #chrome{position:absolute;left:0;right:0;bottom:0;height:30px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;font-size:12px;color:#8c98a8;z-index:5;pointer-events:none}
+  #chrome .brand{display:flex;align-items:center;gap:8px;font-weight:700;color:#6b7686}
+  #progress{position:absolute;left:0;bottom:0;height:4px;background:linear-gradient(90deg,var(--blue),var(--cyan));z-index:6;transition:width .3s ease}
+  .logo{width:var(--ls,40px);height:var(--ls,40px);border-radius:22%;background:var(--blue);display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;box-shadow:0 4px 12px rgba(46,125,246,.4)}
+  .logo svg{width:62%;height:62%;color:#fff}
+
+  /* dark cover / closing */
+  .dark{background:radial-gradient(1200px 700px at 78% 12%,#1c4fa6 0%,#0b1f44 55%,#070f22 100%);color:#fff;padding:0}
+  .dark .wrap{padding:0 72px;display:flex;flex-direction:column;height:100%;justify-content:center;position:relative;z-index:2}
+  .cover-top{display:flex;align-items:center;gap:14px;position:absolute;top:56px;left:72px}
+  .cover-top .bn{font-size:24px;font-weight:800}
+  .cover-top .bn small{display:block;font-size:12px;font-weight:500;color:#a9c4f2;letter-spacing:.18em;margin-top:2px}
+  .big{font-size:78px;font-weight:900;letter-spacing:-.02em;line-height:1.04;background:linear-gradient(180deg,#fff,#cfe0ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .dark .oneline{font-size:23px;color:#cfdbf0;margin-top:22px;font-weight:600;max-width:880px}
+  .dark .oneline b{color:#fff}
+  .chips{display:flex;gap:10px;flex-wrap:wrap;margin-top:26px}
+  .chip{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 17px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);color:#e8f0fe;font-size:15px;font-weight:600}
+  .badge{display:inline-flex;align-items:center;gap:9px;background:rgba(46,184,114,.16);border:1px solid rgba(46,184,114,.5);color:#7df0b6;border-radius:999px;padding:9px 16px;font-size:14px;font-weight:700;margin-top:26px;width:fit-content}
+  .badge .dot{width:9px;height:9px;border-radius:50%;background:#39e08c;box-shadow:0 0 10px #39e08c}
+  .cover-foot{position:absolute;bottom:50px;left:72px;right:72px;display:flex;justify-content:space-between;align-items:flex-end;color:#9fb3d4;font-size:14px}
+
+  /* background slide */
+  .pains{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+  .pain{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow-sm)}
+  .pain .pt{font-size:17px;font-weight:800;color:var(--ink);display:flex;align-items:center;gap:9px}
+  .pain .pd{font-size:14.5px;color:var(--muted);margin-top:8px;line-height:1.55}
+  .solve{margin-top:18px;background:linear-gradient(120deg,#eaf2ff,#f3f8ff);border:1px solid #c5dbff;border-radius:16px;padding:22px 26px;display:flex;gap:18px;align-items:center;box-shadow:var(--shadow-sm)}
+  .solve .arrowto{flex:0 0 auto;width:54px;height:54px;border-radius:14px;background:var(--blue);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(46,125,246,.4)}
+  .solve .arrowto svg{width:28px;height:28px;color:#fff}
+  .solve .sx h3{font-size:23px;font-weight:800;color:var(--blue-ink)}
+  .solve .sx p{font-size:16px;color:var(--ink2);margin-top:6px}
+  .solve .sx p b{color:var(--blue-ink)}
+
+  /* three-step strip */
+  .steps3{display:flex;align-items:stretch;gap:0;margin-bottom:16px}
+  .steps3 .st{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:12px 16px;display:flex;gap:12px;align-items:center;box-shadow:var(--shadow-sm)}
+  .steps3 .n{width:30px;height:30px;border-radius:50%;background:var(--blue);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;flex:0 0 auto;font-family:var(--mono)}
+  .steps3 .tx{font-size:14.5px;font-weight:700;color:var(--ink2);line-height:1.3}
+  .steps3 .tx b{color:var(--blue-ink)}
+  .steps3 .arr{flex:0 0 34px;display:flex;align-items:center;justify-content:center;color:#b6c4d6}
+  .kbd{font-family:var(--mono);font-size:13px;font-weight:700;background:#0f1d33;color:#cfe0ff;border-radius:6px;padding:2px 7px;border:1px solid #2b3f5e}
+
+  /* video frame */
+  .videoframe{flex:1;position:relative;border-radius:18px;overflow:hidden;background:#0e1726;border:1px solid #d7dee8;box-shadow:var(--shadow);min-height:0}
+  .videoframe video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#0e1726;display:none;z-index:2}
+  .vph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;
+    background:repeating-linear-gradient(45deg,#0e1726,#0e1726 16px,#121d30 16px,#121d30 32px);color:#cdd8e8;z-index:1}
+  .vph .play{width:82px;height:82px;border-radius:50%;background:rgba(46,125,246,.18);border:2px solid var(--blue);display:flex;align-items:center;justify-content:center}
+  .vph .play svg{width:36px;height:36px;color:#7fb0ff;margin-left:5px}
+  .vph .vt{font-size:22px;font-weight:800;color:#eaf1fb}
+  .vph .vd{font-size:13.5px;color:#8fa1b8;max-width:600px;line-height:1.6}
+  .vcap{position:absolute;left:0;right:0;bottom:0;z-index:3;background:linear-gradient(180deg,rgba(8,14,24,0),rgba(8,14,24,.82));color:#dfe7f1;padding:24px 20px 12px;font-size:14px;font-weight:600;display:flex;gap:8px;align-items:center}
+
+  /* metrics */
+  .mrow{display:flex;gap:16px;flex-wrap:wrap}
+  .metric{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 22px;min-width:150px;box-shadow:var(--shadow-sm)}
+  .metric .v{font-family:var(--mono);font-size:40px;font-weight:800;color:var(--blue);line-height:1}
+  .metric .v small{font-size:18px;color:var(--muted);font-weight:700}
+  .metric .k{font-size:13.5px;color:var(--muted);margin-top:8px;font-weight:600}
+  .selfcard{margin-top:18px;background:#f1f6ff;border:1px solid #c5dbff;border-radius:14px;padding:18px 22px}
+  .selfcard .st{font-weight:800;color:var(--blue-ink);font-size:17px;display:flex;align-items:center;gap:9px}
+  .selfcard .sd{font-size:15px;color:#3a5170;margin-top:7px}
+  .selfcard .sd b{color:var(--blue-ink)}
+  .foot-note{margin-top:14px;font-size:13.5px;color:var(--muted)}
+
+  /* architecture slide */
+  .archbody{justify-content:flex-start;gap:16px}
+  .archbody svg{width:100%;height:auto;display:block;font-family:var(--sans)}
+  .archcap{display:flex;gap:14px;align-items:stretch}
+  .archcap .c{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 18px;box-shadow:var(--shadow-sm)}
+  .archcap .c .t{font-weight:800;color:var(--blue-ink);font-size:15px;display:flex;gap:8px;align-items:center}
+  .archcap .c .d{font-size:13px;color:var(--muted);margin-top:6px;line-height:1.55}
+
+  /* setup flow slide */
+  .flow5{display:flex;align-items:stretch;margin-top:10px}
+  .flow5 .fstep{flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 14px 16px;box-shadow:var(--shadow-sm)}
+  .flow5 .fn{width:38px;height:38px;border-radius:50%;background:var(--blue);color:#fff;font-weight:800;font-family:var(--mono);display:flex;align-items:center;justify-content:center;font-size:17px;box-shadow:0 4px 10px rgba(46,125,246,.35)}
+  .flow5 .ft{font-size:16px;font-weight:800;color:var(--ink);margin-top:12px}
+  .flow5 .fd{font-size:12.5px;color:var(--muted);margin-top:7px;line-height:1.5;flex:1}
+  .flow5 .role{margin-top:11px;font-size:11px;font-weight:700;border-radius:999px;padding:3px 11px;white-space:nowrap}
+  .flow5 .role.a{background:var(--soft);color:var(--blue-ink);border:1px solid #cfe0ff}
+  .flow5 .role.b{background:#e7f7ef;color:#1c7a4f;border:1px solid #bce6d1}
+  .flow5 .role.c{background:#eef2f8;color:#5b6776;border:1px solid #dbe3ee}
+  .flow5 .farr{flex:0 0 24px;display:flex;align-items:center;justify-content:center;color:#b6c4d6}
+  .flow-note{margin-top:18px;background:#fffaf0;border:1px solid #f0dca8;border-radius:12px;padding:13px 18px;font-size:13.5px;color:#7a5a14;line-height:1.55}
+  .flow-note b{color:#9a6512}
+
+  /* closing roadmap pill */
+  .nextcard{display:inline-flex;align-items:center;gap:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:14px;padding:14px 20px;margin-top:24px;max-width:760px}
+  .nextcard .nk{font-size:12px;letter-spacing:.14em;color:#7fb0ff;font-weight:800;text-transform:uppercase;flex:0 0 auto}
+  .nextcard .nd{font-size:16px;color:#dbe7f8;font-weight:600}
+  .repo{display:inline-flex;align-items:center;gap:14px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.24);border-radius:14px;padding:13px 20px;margin-top:22px}
+  .repo .gi{width:32px;height:32px;flex:0 0 auto;color:#fff}
+  .repo .gi svg{width:100%;height:100%}
+  .repo .rx .rl{font-family:var(--mono);font-size:19px;font-weight:700;color:#fff}
+  .repo .rx .rt{font-size:13px;color:#9fc0f5;margin-top:3px;font-weight:600}
+  .repo .os{margin-left:6px;background:rgba(46,184,114,.18);border:1px solid rgba(46,184,114,.5);color:#7df0b6;border-radius:999px;padding:7px 13px;font-size:12.5px;font-weight:700;white-space:nowrap}
+
+  #hint{position:absolute;right:14px;top:12px;z-index:20;font-size:11.5px;color:#9aa6b6;background:rgba(255,255,255,.7);border-radius:8px;padding:5px 10px;font-family:var(--mono)}
+  .dark #hint{background:rgba(255,255,255,.12);color:#cdd8e8}
+
+  @page{size:1280px 720px;margin:0}
+  @media print{
+    body{background:#fff;overflow:visible}
+    #stage{position:static;transform:none!important;width:1280px;height:auto}
+    .slide{position:relative;inset:auto;display:flex!important;page-break-after:always;width:1280px;height:720px}
+    #chrome,#progress,#hint{display:none!important}
+    .slide.active{animation:none}
+    .videoframe video{display:none} .vph{display:flex}
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <!-- 1 · COVER -->
+  <section class="slide dark active">
+    <div class="wrap">
+      <div class="cover-top">
+        <span class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 14l2 2 4-4"/></svg></span>
+        <div class="bn">AirPaste<small>跨设备共享剪贴板</small></div>
+      </div>
+      <div class="big">复制一处<br>处处可粘</div>
+      <div class="oneline">在一台设备复制，在另一台按 <b>一个快捷键</b>（或<b>轻点手机背面</b>）就粘贴。</div>
+      <div class="chips">
+        <span class="chip">📱 iPhone</span>
+        <span class="chip">💻 macOS</span>
+        <span class="chip">🪟 Windows</span>
+        <span class="chip">🔒 端到端加密</span>
+        <span class="chip">🏠 自托管 · 数据不上商业云</span>
+        <span class="chip">⭐ 开源</span>
+      </div>
+      <div class="badge"><span class="dot"></span>已交付 v0.1.1 · 真机端到端验证通过 · 现场实测演示</div>
+      <div class="cover-foot">
+        <div>公司 6 月「个人 AI 提效工具开发竞赛」· 技术赛道</div>
+        <div>个人作品 · 3 分钟演示</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 · BACKGROUND -->
+  <section class="slide">
+    <div class="stepno">01</div>
+    <div class="kicker">产品背景 · BACKGROUND</div>
+    <h1 class="t">一个每天都在发生的小麻烦</h1>
+    <div class="sub">在手机、Mac、Windows 之间反复搬运同一段内容——验证码、地址、命令、报错、链接……</div>
+    <div class="body">
+      <div class="pains">
+        <div class="pain">
+          <div class="pt">💬 微信「文件传输助手」</div>
+          <div class="pd">切过去、发完再切回来、再复制——不连贯，打断手头的事。</div>
+        </div>
+        <div class="pain">
+          <div class="pt">🍎 苹果「通用剪贴板」</div>
+          <div class="pd">好用，但只在苹果设备之间，Windows 用不了。</div>
+        </div>
+        <div class="pain">
+          <div class="pt">☁️ 商业云剪贴板</div>
+          <div class="pd">内容要上传公有云，公司内容放上去不放心。</div>
+        </div>
+      </div>
+      <div class="solve">
+        <div class="arrowto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="sx">
+          <h3>AirPaste：复制 → 一个快捷键 → 另一台粘贴</h3>
+          <p>横跨 <b>Mac / Windows / iPhone</b> 双向打通，<b>端到端加密</b>、可<b>完全自托管</b>。手机端连 App 都不用装。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 · LIVE DEMO (video, ~60s) -->
+  <section class="slide">
+    <div class="stepno">02</div>
+    <div class="kicker">现场演示 · LIVE DEMO</div>
+    <h1 class="t">复制一处，处处可粘 —— 看一遍就懂</h1>
+    <div class="body">
+      <div class="steps3">
+        <div class="st"><span class="n">1</span><span class="tx">iPhone 复制，<b>敲两下背面</b>发送</span></div>
+        <div class="arr"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="st"><span class="n">2</span><span class="tx">Windows 按 <span class="kbd">Alt+V</span> 粘贴</span></div>
+        <div class="arr"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="st"><span class="n">3</span><span class="tx">反向：电脑 <span class="kbd">Alt+C</span> 发送，<b>敲三下背面</b>取回</span></div>
+      </div>
+      <div class="videoframe">
+        <video id="v1" muted playsinline controls preload="metadata">
+          <source src="videos/demo.mp4" type="video/mp4">
+        </video>
+        <div class="vph" id="ph1">
+          <div class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>
+          <div class="vt">演示视频　手机 ↔ 电脑（约 60 秒）</div>
+          <div class="vd">把双向演示剪成一段连续片段，导出为 <b>videos/demo.mp4</b> 放进 <b>pitch/videos/</b>，这里会自动播放。<br>（也可保留两段，分别命名 demo1 / demo2 后改一下 source。）</div>
+        </div>
+        <div class="vcap">📱 手机连 App 都不用装 —— 系统「快捷指令」+「轻点背面」即可收发</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 · ARCHITECTURE -->
+  <section class="slide">
+    <div class="stepno">03</div>
+    <div class="kicker">技术架构 · ARCHITECTURE</div>
+    <h1 class="t">三端互通：局域网直连优先，服务器只做「指挥」</h1>
+    <div class="body archbody">
+      <svg viewBox="0 0 1140 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AirPaste 架构拓扑图">
+        <!-- connections: devices to server (control plane) -->
+        <line x1="190" y1="250" x2="492" y2="104" stroke="#2e7df6" stroke-width="2.5" stroke-linecap="round" opacity="0.72"/>
+        <line x1="570" y1="250" x2="570" y2="104" stroke="#2e7df6" stroke-width="2.5" stroke-linecap="round" opacity="0.72"/>
+        <line x1="950" y1="250" x2="648" y2="104" stroke="#2e7df6" stroke-width="2.5" stroke-linecap="round" opacity="0.72"/>
+        <!-- direct LAN file link between Mac & Windows -->
+        <line x1="310" y1="320" x2="450" y2="320" stroke="#2eb872" stroke-width="4" stroke-linecap="round"/>
+        <!-- line labels -->
+        <text x="585" y="182" font-size="13" font-weight="700" fill="#16386f">控制面 · 信令</text>
+        <text x="806" y="190" font-size="12.5" font-weight="600" fill="#5b6776" text-anchor="middle">快捷指令 · HTTPS</text>
+        <rect x="324" y="288" width="112" height="22" rx="11" fill="#e7f7ef" stroke="#bce6d1"/>
+        <text x="380" y="303" font-size="12.5" font-weight="700" fill="#1c7a4f" text-anchor="middle">局域网直连</text>
+        <circle cx="380" cy="320" r="12" fill="#ffffff" stroke="#2eb872" stroke-width="1.5"/>
+        <text x="380" y="325" font-size="12" text-anchor="middle">🔒</text>
+
+        <!-- server card -->
+        <rect x="408" y="10" width="324" height="94" rx="16" fill="#ffffff" stroke="#c5dbff" stroke-width="2"/>
+        <text x="570" y="44" font-size="19" font-weight="800" fill="#0f1620" text-anchor="middle">🗄️ AirPaste 服务器（控制面）</text>
+        <text x="570" y="68" font-size="13.5" fill="#5b6776" text-anchor="middle">配对 · 在线状态 · 信令 · 元数据</text>
+        <text x="570" y="90" font-size="13.5" font-weight="700" fill="#1c7a4f" text-anchor="middle">🔒 只见密文 · 不存文件 · 可自托管</text>
+
+        <!-- device cards -->
+        <rect x="70" y="250" width="240" height="100" rx="14" fill="#ffffff" stroke="#dbe3ee" stroke-width="2"/>
+        <text x="190" y="294" font-size="30" text-anchor="middle">💻</text>
+        <text x="190" y="324" font-size="18" font-weight="800" fill="#0f1620" text-anchor="middle">macOS</text>
+        <text x="190" y="343" font-size="12.5" fill="#5b6776" text-anchor="middle">菜单栏 App</text>
+
+        <rect x="450" y="250" width="240" height="100" rx="14" fill="#ffffff" stroke="#dbe3ee" stroke-width="2"/>
+        <text x="570" y="294" font-size="30" text-anchor="middle">🪟</text>
+        <text x="570" y="324" font-size="18" font-weight="800" fill="#0f1620" text-anchor="middle">Windows</text>
+        <text x="570" y="343" font-size="12.5" fill="#5b6776" text-anchor="middle">系统托盘</text>
+
+        <rect x="830" y="250" width="240" height="100" rx="14" fill="#ffffff" stroke="#dbe3ee" stroke-width="2"/>
+        <text x="950" y="294" font-size="30" text-anchor="middle">📱</text>
+        <text x="950" y="324" font-size="18" font-weight="800" fill="#0f1620" text-anchor="middle">iPhone</text>
+        <text x="950" y="343" font-size="12.5" fill="#5b6776" text-anchor="middle">快捷指令 · 免装 App</text>
+      </svg>
+      <div class="archcap">
+        <div class="c"><div class="t">🔒 端到端加密</div><div class="d">文本与文件都在你设备上加密，服务器全程只见密文。</div></div>
+        <div class="c"><div class="t">⚡ 局域网直连优先</div><div class="d">同网设备 mDNS 自动发现，文件点对点直传——快，且不经服务器。</div></div>
+        <div class="c"><div class="t">🛡️ 加密中继兜底</div><div class="d">直连不可达时，文件经服务器转发密文，服务器不解密、不落盘。</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 · SETUP FLOW -->
+  <section class="slide">
+    <div class="stepno">04</div>
+    <div class="kicker">使用流程 · SETUP</div>
+    <h1 class="t">五步连上 —— 全程在窗口里点几下，无需命令行</h1>
+    <div class="sub">第一台设备自动信任，其余设备凭一个配对码加入。</div>
+    <div class="body">
+      <div class="flow5">
+        <div class="fstep">
+          <div class="fn">1</div>
+          <div class="ft">运行</div>
+          <div class="fd">每台设备启动 AirPaste 托盘程序</div>
+          <div class="role c">全部设备</div>
+        </div>
+        <div class="farr"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="fstep">
+          <div class="fn">2</div>
+          <div class="ft">开服务器</div>
+          <div class="fd">任选一台，勾「本机运行服务器」并连接（首台自动可信）</div>
+          <div class="role a">🖥 服务器那台</div>
+        </div>
+        <div class="farr"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="fstep">
+          <div class="fn">3</div>
+          <div class="ft">生成配对码</div>
+          <div class="fd">这台点「生成配对码」，得到 6 位数字</div>
+          <div class="role a">🖥 服务器那台</div>
+        </div>
+        <div class="farr"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="fstep">
+          <div class="fn">4</div>
+          <div class="ft">输入配对码</div>
+          <div class="fd">其他设备填服务器地址，输入配对码 → 连接</div>
+          <div class="role b">📲 其他设备</div>
+        </div>
+        <div class="farr"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="fstep">
+          <div class="fn">5</div>
+          <div class="ft">开始用</div>
+          <div class="fd">复制 → 按发送键 → 另一台按粘贴键</div>
+          <div class="role c">全部设备</div>
+        </div>
+      </div>
+      <div class="flow-note">💡 全程在托盘窗口点选。默认地址 <b>http://127.0.0.1:14444</b>（本机）；其他设备改填服务器那台的局域网地址，例如 <b>http://192.168.1.20:14444</b>。</div>
+    </div>
+  </section>
+
+  <!-- 6 · RESULTS -->
+  <section class="slide">
+    <div class="stepno">05</div>
+    <div class="kicker">提效成果 · RESULTS</div>
+    <h1 class="t">省下的是每天被打断的那几十秒</h1>
+    <div class="sub">高频小事，乘以人数和天数，就是可观的时间。</div>
+    <div class="body">
+      <div class="mrow">
+        <div class="metric"><div class="v">12s<small> → </small>2s</div><div class="k">单次搬运耗时（省约 83%）</div></div>
+        <div class="metric"><div class="v">≈15<small> h</small></div><div class="k">单人每年回收（区间 12–18h）</div></div>
+        <div class="metric"><div class="v">×N</div><div class="k">随团队人数线性放大</div></div>
+        <div class="metric"><div class="v">0</div><div class="k">第三方云 · 数据不出内网</div></div>
+      </div>
+      <div class="selfcard">
+        <div class="st">⚡ 它本身就是「AI 提效」的产物</div>
+        <div class="sd">这套横跨 Mac / Windows / iPhone、端到端加密的跨平台工具，是一个人用 AI、约 <b>8 天</b>业余时间独立做出来的（约 <b>11,700 行 Rust</b>）—— 产品好用，研发本身也是一次 AI 提效实证。</div>
+      </div>
+      <div class="foot-note">* 保守估算：单岗每天搬运约 25 次、每次省约 10 秒。公式与假设全公开，欢迎用真实频次重算。</div>
+    </div>
+  </section>
+
+  <!-- 7 · CLOSING -->
+  <section class="slide dark">
+    <div class="wrap">
+      <div class="cover-top">
+        <span class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 14l2 2 4-4"/></svg></span>
+        <div class="bn">AirPaste<small>跨设备共享剪贴板</small></div>
+      </div>
+      <div class="big">复制一处，处处可粘</div>
+      <div class="oneline">跨 <b>Mac / Windows / iPhone</b> · 端到端加密 · 自托管不上云。</div>
+      <div class="nextcard">
+        <span class="nk">下一步</span>
+        <span class="nd">电脑端剪贴板历史 —— 整本翻回去，挑任意一条来粘贴（只在本机、同样加密）。</span>
+      </div>
+      <div class="repo">
+        <span class="gi"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></span>
+        <div class="rx">
+          <div class="rl">github.com/touchdawn/air-paste</div>
+          <div class="rt">开源 (Apache-2.0) · 自己就能跑一整套</div>
+        </div>
+        <span class="os">现在就能装 · v0.1.1</span>
+      </div>
+      <div class="cover-foot">
+        <div>谢谢，请提问 🙌</div>
+        <div>个人 AI 提效竞赛 · 技术赛道</div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div id="chrome">
+  <div class="brand"><span style="width:16px;height:16px;border-radius:5px;background:var(--blue);display:inline-block"></span>AirPaste · 个人 AI 提效竞赛（技术赛道）</div>
+  <div><span class="num" id="cur">1</span> / <span class="num" id="tot">5</span></div>
+</div>
+<div id="progress"></div>
+<div id="hint">← → 翻页 · F 全屏 · 点视频播放</div>
+
+<script>
+const slides=[...document.querySelectorAll('.slide')];
+const tot=slides.length; let i=0;
+const cur=document.getElementById('cur'),prog=document.getElementById('progress');
+document.getElementById('tot').textContent=tot;
+function show(n){
+  i=Math.max(0,Math.min(tot-1,n));
+  slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+  cur.textContent=i+1; prog.style.width=((i+1)/tot*100)+'%';
+  if(location.hash!=='#'+(i+1)) history.replaceState(null,'','#'+(i+1));
+  document.querySelectorAll('video').forEach(v=>{if(!v.closest('.slide').classList.contains('active'))v.pause();});
+}
+function fit(){const s=Math.min(window.innerWidth/1280,window.innerHeight/720);document.getElementById('stage').style.transform='translate(-50%,-50%) scale('+s+')';}
+addEventListener('resize',fit);fit();
+addEventListener('keydown',e=>{
+  if(['ArrowRight','PageDown',' '].includes(e.key)){show(i+1);e.preventDefault();}
+  else if(['ArrowLeft','PageUp'].includes(e.key)){show(i-1);e.preventDefault();}
+  else if(e.key==='Home')show(0); else if(e.key==='End')show(tot-1);
+  else if(e.key.toLowerCase()==='f'){if(!document.fullscreenElement)document.documentElement.requestFullscreen();else document.exitFullscreen();}
+});
+addEventListener('click',e=>{if(e.target.closest('video')||e.target.closest('.vph'))return;(e.clientX>innerWidth/2)?show(i+1):show(i-1);});
+// reveal video only if it actually loads; otherwise keep the placeholder
+const v=document.getElementById('v1'),ph=document.getElementById('ph1');
+v.addEventListener('loadeddata',()=>{v.style.display='block';ph.style.display='none';});
+const start=Math.max(1,Math.min(tot,parseInt((location.hash||'').slice(1))||1));
+show(start-1);
+</script>
+</body>
+</html>

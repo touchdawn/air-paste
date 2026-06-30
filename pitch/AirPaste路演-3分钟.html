@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AirPaste · 3 分钟路演（演示版）</title>
+<style>
+  :root{
+    --blue:#2e7df6; --blue-deep:#0b3d91; --blue-ink:#16386f;
+    --green:#2eb872; --amber:#d98e2b; --red:#d93a3a; --cyan:#179aa6;
+    --ink:#0f1620; --ink2:#1e2732; --muted:#5b6776; --line:#dbe3ee;
+    --bg:#eef2f8; --panel:#ffffff; --soft:#eef4ff; --soft2:#f5f8fd;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono","Roboto Mono",Menlo,Consolas,monospace;
+    --sans:"PingFang SC","Microsoft YaHei",ui-sans-serif,system-ui,-apple-system,"Segoe UI","Source Han Sans SC",sans-serif;
+    --shadow:0 18px 48px rgba(16,35,60,.14);
+    --shadow-sm:0 6px 18px rgba(16,35,60,.10);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:#0c1320;color:var(--ink);font-family:var(--sans);overflow:hidden;-webkit-font-smoothing:antialiased;line-height:1.5}
+  #stage{position:absolute;top:50%;left:50%;width:1280px;height:720px;transform-origin:center center}
+  .slide{position:absolute;inset:0;display:none;flex-direction:column;background:var(--bg);overflow:hidden;padding:54px 64px 60px}
+  .slide.active{display:flex;animation:fade .45s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+  .kicker{font-size:15px;letter-spacing:.14em;color:var(--blue);font-weight:700;text-transform:uppercase}
+  h1.t{font-size:40px;font-weight:800;color:var(--ink);line-height:1.16;letter-spacing:-.01em}
+  .sub{font-size:19px;color:var(--muted);margin-top:8px;font-weight:500}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .pill{display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 14px;border-radius:999px;background:var(--soft);color:var(--blue-ink);font-size:14.5px;font-weight:600;border:1px solid #cfe0ff}
+  .tag-green{background:#e7f7ef;color:#1c7a4f;border-color:#bce6d1}
+  .tag-amber{background:#fdf3e2;color:#9a6512;border-color:#f3dcb1}
+
+  .head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:22px}
+  .head .left{display:flex;flex-direction:column;gap:6px}
+  .stepno{font-family:var(--mono);font-size:120px;font-weight:800;color:#e2e9f4;line-height:.8;position:absolute;right:48px;top:30px;user-select:none;letter-spacing:-.04em}
+
+  #chrome{position:absolute;left:0;right:0;bottom:0;height:30px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;font-size:12px;color:#8c98a8;z-index:5;pointer-events:none}
+  #chrome .brand{display:flex;align-items:center;gap:8px;font-weight:700;color:#6b7686}
+  #progress{position:absolute;left:0;bottom:0;height:4px;background:linear-gradient(90deg,var(--blue),var(--cyan));z-index:6;transition:width .3s ease}
+
+  .logo{width:var(--ls,40px);height:var(--ls,40px);border-radius:22%;background:var(--blue);display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;box-shadow:0 4px 12px rgba(46,125,246,.4)}
+  .logo svg{width:62%;height:62%}
+
+  /* cover / closing dark */
+  .dark{background:radial-gradient(1200px 700px at 78% 12%,#1c4fa6 0%,#0b1f44 55%,#070f22 100%);color:#fff;padding:0}
+  .dark .wrap{padding:66px 72px;display:flex;flex-direction:column;height:100%;justify-content:center;position:relative;z-index:2}
+  .cover-top{display:flex;align-items:center;gap:14px;position:absolute;top:56px;left:72px}
+  .cover-top .bn{font-size:24px;font-weight:800}
+  .cover-top .bn small{display:block;font-size:12px;font-weight:500;color:#a9c4f2;letter-spacing:.18em;margin-top:2px}
+  .big{font-size:74px;font-weight:900;letter-spacing:-.02em;line-height:1.04;background:linear-gradient(180deg,#fff,#cfe0ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .dark .oneline{font-size:23px;color:#cfdbf0;margin-top:20px;font-weight:600}
+  .dark .oneline b{color:#fff}
+  .dark .meta2{font-size:17px;color:#9fc0f5;margin-top:14px}
+  .badge{display:inline-flex;align-items:center;gap:9px;background:rgba(46,184,114,.16);border:1px solid rgba(46,184,114,.5);color:#7df0b6;border-radius:999px;padding:9px 16px;font-size:14px;font-weight:700;margin-top:28px;width:fit-content}
+  .badge .dot{width:9px;height:9px;border-radius:50%;background:#39e08c;box-shadow:0 0 10px #39e08c}
+  .cover-foot{position:absolute;bottom:50px;left:72px;right:72px;display:flex;justify-content:space-between;align-items:flex-end;color:#9fb3d4;font-size:14px}
+  .linkmotif{position:absolute;right:0;top:120px;width:520px;height:320px;opacity:.85;z-index:1}
+
+  .body{flex:1;display:flex;flex-direction:column;min-height:0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px 24px;box-shadow:var(--shadow-sm)}
+  .card h3{font-size:20px;font-weight:800;color:var(--ink);display:flex;align-items:center;gap:10px}
+  .card p{font-size:16px;color:var(--ink2);margin-top:9px}
+  .card .mini{font-size:13.5px;color:var(--muted)}
+  .ic{width:36px;height:36px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto}
+  .ic svg{width:21px;height:21px}
+  .ic.b{background:var(--soft);color:var(--blue)} .ic.g{background:#e7f7ef;color:var(--green)}
+  .ic.a{background:#fdf3e2;color:var(--amber)} .ic.c{background:#e4f5f6;color:var(--cyan)} .ic.r{background:#fdecec;color:var(--red)}
+
+  .mrow{display:flex;gap:16px;flex-wrap:wrap}
+  .metric{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 20px;min-width:160px;box-shadow:var(--shadow-sm)}
+  .metric .v{font-family:var(--mono);font-size:38px;font-weight:800;color:var(--blue);line-height:1}
+  .metric .v small{font-size:18px;color:var(--muted);font-weight:700}
+  .metric .k{font-size:13.5px;color:var(--muted);margin-top:7px;font-weight:600}
+
+  /* three-step row */
+  .steps3{display:flex;align-items:stretch;gap:0;margin:4px 0 18px}
+  .steps3 .st{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:13px 16px;display:flex;gap:12px;align-items:center;box-shadow:var(--shadow-sm)}
+  .steps3 .n{width:30px;height:30px;border-radius:50%;background:var(--blue);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;flex:0 0 auto;font-family:var(--mono)}
+  .steps3 .tx{font-size:15px;font-weight:700;color:var(--ink2);line-height:1.3}
+  .steps3 .tx b{color:var(--blue-ink)}
+  .steps3 .arr{flex:0 0 38px;display:flex;align-items:center;justify-content:center;color:#b6c4d6}
+
+  /* video frame */
+  .videoframe{flex:1;position:relative;border-radius:18px;overflow:hidden;background:#0e1726;border:1px solid #d7dee8;box-shadow:var(--shadow);min-height:0}
+  .videoframe video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#0e1726;display:none;z-index:2}
+  .vph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;
+    background:repeating-linear-gradient(45deg,#0e1726,#0e1726 16px,#121d30 16px,#121d30 32px);color:#cdd8e8;z-index:1}
+  .vph .play{width:78px;height:78px;border-radius:50%;background:rgba(46,125,246,.18);border:2px solid var(--blue);display:flex;align-items:center;justify-content:center}
+  .vph .play svg{width:34px;height:34px;color:#7fb0ff;margin-left:5px}
+  .vph .vt{font-size:22px;font-weight:800;color:#eaf1fb}
+  .vph .vd{font-size:13.5px;color:#8fa1b8;max-width:560px;line-height:1.6}
+  .vcap{position:absolute;left:0;right:0;bottom:0;z-index:3;background:linear-gradient(180deg,rgba(8,14,24,0),rgba(8,14,24,.82));color:#dfe7f1;padding:22px 20px 12px;font-size:14px;font-weight:600;display:flex;gap:8px;align-items:center}
+
+  .note{margin-top:14px;background:#fffaf0;border:1px solid #f0dca8;border-radius:12px;padding:12px 16px;font-size:14px;color:#7a5a14;display:flex;gap:10px;align-items:flex-start}
+  .note b{color:#9a6512}
+  .sidecard{background:#f1f6ff;border:1px solid #c5dbff;border-radius:14px;padding:16px 20px}
+  .sidecard .st{font-weight:800;color:var(--blue-ink);font-size:16px;display:flex;align-items:center;gap:9px}
+  .sidecard .sd{font-size:14px;color:#3a5170;margin-top:8px}
+
+  #hint{position:absolute;right:14px;top:12px;z-index:20;font-size:11.5px;color:#9aa6b6;background:rgba(255,255,255,.7);border-radius:8px;padding:5px 10px;font-family:var(--mono)}
+  .dark #hint{background:rgba(255,255,255,.12);color:#cdd8e8}
+
+  /* clipboard-history mockup (roadmap slide) */
+  .hist{background:#fff;border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow-sm);height:100%;display:flex;flex-direction:column}
+  .hist .hh{background:#f1f4f9;border-bottom:1px solid var(--line);padding:13px 16px;font-weight:800;color:var(--ink);font-size:15px;display:flex;align-items:center;gap:9px}
+  .hist .hh .dots{display:flex;gap:6px;margin-right:4px}
+  .hist .hh .dots i{width:10px;height:10px;border-radius:50%;background:#dfe4ec}
+  .hist .hrow{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #eef2f7}
+  .hist .hrow.sel{background:var(--soft);box-shadow:inset 3px 0 0 var(--blue)}
+  .hist .htype{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;font-size:13px;font-weight:800;color:#fff}
+  .hist .hprev{flex:1;min-width:0;font-size:14px;color:var(--ink2);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hist .htime{font-size:12px;color:var(--muted);font-family:var(--mono);flex:0 0 auto}
+  .hist .hbtn{flex:0 0 auto;background:var(--blue);color:#fff;font-size:12px;font-weight:700;border-radius:7px;padding:5px 12px;box-shadow:0 3px 8px rgba(46,125,246,.35)}
+  @page{size:1280px 720px;margin:0}
+  @media print{
+    body{background:#fff;overflow:visible}
+    #stage{position:static;transform:none!important;width:1280px;height:auto}
+    .slide{position:relative;inset:auto;display:flex!important;page-break-after:always;width:1280px;height:720px}
+    #chrome,#progress,#hint{display:none!important}
+    .slide.active{animation:none}
+    .videoframe video{display:none} .vph{display:flex}
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <!-- 1 · COVER -->
+  <section class="slide dark active">
+    <svg class="linkmotif" viewBox="0 0 520 320" fill="none">
+      <defs><linearGradient id="cl" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7fb0ff"/><stop offset="1" stop-color="#39e08c"/></linearGradient></defs>
+      <path d="M40 230 C 170 230, 320 100, 460 100" stroke="url(#cl)" stroke-width="3" stroke-dasharray="2 9" stroke-linecap="round" opacity=".8"/>
+      <g transform="translate(8,190)"><rect width="80" height="80" rx="17" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)"/><text x="40" y="48" font-size="20" font-weight="700" fill="#dbe8ff" text-anchor="middle" font-family="sans-serif">手机</text></g>
+      <g transform="translate(420,60)"><rect width="80" height="80" rx="17" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.3)"/><text x="40" y="48" font-size="20" font-weight="700" fill="#dbe8ff" text-anchor="middle" font-family="sans-serif">电脑</text></g>
+      <circle cx="250" cy="165" r="7" fill="#39e08c"><animateMotion dur="2.6s" repeatCount="indefinite" path="M-200 65 C -70 65, 80 -65, 200 -65"/></circle>
+    </svg>
+    <div class="wrap">
+      <div class="cover-top">
+        <span class="logo" style="--ls:50px"><svg viewBox="0 0 64 64"><polygon points="50,13 13,31 31,34" fill="#fff"/><polygon points="50,13 31,34 33,51" fill="#fff"/></svg></span>
+        <span class="bn">AirPaste<small>跨设备共享剪贴板</small></span>
+      </div>
+      <div class="big">复制一处，处处可粘</div>
+      <div class="oneline">在一台设备复制，在另一台按 <b>一个快捷键</b>（或<b>轻点手机背面</b>）就粘贴</div>
+      <div class="meta2">横跨 Mac / Windows / iPhone　·　端到端加密　·　数据不上任何商业云</div>
+      <span class="badge"><span class="dot"></span>已交付 v0.1.1 · 真机端到端验证通过 · 现场实测演示</span>
+    </div>
+    <div class="cover-foot">
+      <span>公司 6 月「个人 AI 提效工具开发竞赛」 · 技术赛道</span>
+      <span>个人作品 · 3 分钟演示</span>
+    </div>
+  </section>
+
+  <!-- 2 · 产品背景 -->
+  <section class="slide">
+    <div class="stepno">01</div>
+    <div class="head"><div class="left">
+      <span class="kicker">产品背景 · Background</span>
+      <h1 class="t">一个每天都在发生的小麻烦</h1>
+      <div class="sub">在手机、Mac、Windows 之间反复搬运同一段内容</div>
+    </div></div>
+    <div class="body">
+      <div class="grid2" style="flex:1">
+        <div class="card" style="background:linear-gradient(160deg,#fff,#fbf4f0)">
+          <h3><span class="ic r"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zm1 15h-2v-2h2zm0-4h-2V7h2z"/></svg></span>痛点：搬运很别扭</h3>
+          <p>手机上看到的验证码、地址、一段文字，想发到电脑；电脑上的命令、报错、链接，想发到手机或另一台机器。</p>
+          <p>最常用的是微信「文件传输助手」，但要切到微信、发完再切回来、再复制 —— <b>不连贯，打断手头的事</b>；U 盘还得插拔。</p>
+          <p class="mini">苹果「通用剪贴板」只在苹果设备间用；商业云剪贴板要把内容上传公有云，公司内容不放心。</p>
+        </div>
+        <div class="card" style="background:linear-gradient(160deg,#fff,#f1f7ff)">
+          <h3><span class="ic b"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M5 12l5 5L20 7l-1.5-1.5L10 14 6.5 10.5z"/></svg></span>AirPaste：一个快捷键就到</h3>
+          <p><b>复制 → 一个快捷键发送 → 另一台粘贴。</b>双向打通 Mac / Windows / iPhone。</p>
+          <p>手机端<b>连 App 都不用装</b>：用系统「快捷指令」+「轻点背面」就能收发。</p>
+          <p>全程<b>端到端加密</b>：内容在你设备上就加密，<b>连中转的服务器都看不到明文</b>；还能完全自托管、不经任何商业云。</p>
+        </div>
+      </div>
+      <div class="mrow" style="margin-top:18px;justify-content:center">
+        <span class="pill">📱 iPhone</span><span class="pill">💻 macOS</span><span class="pill">🪟 Windows</span>
+        <span class="pill tag-green">🔒 端到端加密</span><span class="pill tag-green">🏠 自托管不上云</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 · 演示① 手机 → 电脑 -->
+  <section class="slide">
+    <div class="stepno">02</div>
+    <div class="head"><div class="left">
+      <span class="kicker">现场演示 ① · 手机 → 电脑</span>
+      <h1 class="t">手机复制，电脑粘贴</h1>
+    </div></div>
+    <div class="body">
+      <div class="steps3">
+        <div class="st"><span class="n">1</span><span class="tx">iPhone 上选中文字，<b>点击复制</b></span></div>
+        <div class="arr"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="st"><span class="n">2</span><span class="tx"><b>敲两下手机背面</b>，发送</span></div>
+        <div class="arr"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="st"><span class="n">3</span><span class="tx">Windows 上按 <b>Alt+V</b> 粘贴</span></div>
+      </div>
+      <div class="videoframe">
+        <video id="v1" preload="auto" controls playsinline muted><source src="videos/demo1-phone-to-pc.mp4" type="video/mp4"></video>
+        <div class="vph" id="ph1">
+          <div class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>
+          <div class="vt">演示视频 ①　手机 → 电脑</div>
+          <div class="vd">把片段 1+2+3 剪好导出为 <b>videos/demo1-phone-to-pc.mp4</b>，放进 pitch/videos/，这里会自动播放。</div>
+        </div>
+        <div class="vcap">📱 手机连 App 都不用装 —— 系统「快捷指令」+「轻点背面」二击即发送</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 · 演示② 电脑 → 手机 -->
+  <section class="slide">
+    <div class="stepno">03</div>
+    <div class="head"><div class="left">
+      <span class="kicker">现场演示 ② · 电脑 → 手机</span>
+      <h1 class="t">电脑复制，手机取回</h1>
+    </div></div>
+    <div class="body">
+      <div class="steps3">
+        <div class="st"><span class="n">1</span><span class="tx">Windows 上选中文字，<b>Alt+C</b> 发送</span></div>
+        <div class="arr"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="st"><span class="n">2</span><span class="tx"><b>敲三下手机背面</b>，取回</span></div>
+        <div class="arr"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="st"><span class="n">3</span><span class="tx">文字自动<b>粘贴</b>到手机</span></div>
+      </div>
+      <div class="videoframe">
+        <video id="v2" preload="auto" controls playsinline muted><source src="videos/demo2-pc-to-phone.mp4" type="video/mp4"></video>
+        <div class="vph" id="ph2">
+          <div class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>
+          <div class="vt">演示视频 ②　电脑 → 手机</div>
+          <div class="vd">把片段 4+5+6 剪好导出为 <b>videos/demo2-pc-to-phone.mp4</b>，放进 pitch/videos/，这里会自动播放。</div>
+        </div>
+        <div class="vcap">↩︎ 反方向同样一步到位 —— 电脑 Alt+C 发送，手机轻点背面三击取回</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 · 提效成果 -->
+  <section class="slide">
+    <div class="stepno">04</div>
+    <div class="head"><div class="left">
+      <span class="kicker">提效成果 · Results</span>
+      <h1 class="t">省下的是每天被打断的那几十秒</h1>
+      <div class="sub">高频小事，乘以人数和天数，就是可观的时间</div>
+    </div></div>
+    <div class="body">
+      <div class="mrow" style="margin-bottom:18px">
+        <div class="metric"><div class="v">12s<small> → </small>2s</div><div class="k">单次搬运耗时（省约 83%）</div></div>
+        <div class="metric"><div class="v">15<small> h</small></div><div class="k">单人每年回收（区间 12–18h）</div></div>
+        <div class="metric"><div class="v">×N</div><div class="k">随团队人数线性放大</div></div>
+        <div class="metric"><div class="v">0</div><div class="k">第三方云 · 数据不出内网</div></div>
+      </div>
+      <div class="grid2" style="flex:1">
+        <div class="card" style="display:flex;flex-direction:column;justify-content:center">
+          <h3><span class="ic g"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h4v8H3zM10 3h4v18h-4zM17 9h4v12h-4z"/></svg></span>产品提效：替每位同事省时间</h3>
+          <p>把每天几十次的「复制—切换—等待—粘贴」压成 <b>复制 + 一个快捷键</b>。用的人越多，省的时间越多。</p>
+          <p class="mini">保守估算：单岗每天搬运约 25 次、每次省约 10 秒 → 单人每年约 15 小时（区间 12–18h）。公式与假设全公开，欢迎用真实频次重算。</p>
+        </div>
+        <div class="sidecard" style="display:flex;flex-direction:column;justify-content:center">
+          <div class="st"><span class="ic a" style="width:34px;height:34px"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3 7h7l-5.5 4 2 7-6.5-4.5L5 20l2-7L1.5 9h7z"/></svg></span>它本身就是「AI 提效」的产物</div>
+          <div class="sd">这套横跨 <b>Mac/Windows/iPhone</b>、端到端加密的跨平台工具，是<b>一个人用 AI、约 8 天业余时间</b>独立做出来的（约 11,700 行 Rust）。AI 把个人产出放大约 <b>4–6 倍</b> —— 产品好用，研发本身也是一次 AI 提效实证。</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 · 展望 -->
+  <section class="slide">
+    <div class="stepno">05</div>
+    <div class="head"><div class="left">
+      <span class="kicker">展望 · ROADMAP</span>
+      <h1 class="t">不只是「最近一条」，而是一整本剪贴板</h1>
+      <div class="sub">下一步：电脑端剪贴板历史，挑任意一条来粘贴</div>
+    </div></div>
+    <div class="body">
+      <div class="grid2" style="flex:1;grid-template-columns:1fr 1.04fr;align-items:stretch">
+        <div style="display:flex;flex-direction:column;gap:16px;justify-content:center">
+          <div class="card">
+            <h3><span class="ic b"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h16v3H4zM4 9h16v3H4zM4 14h11v3H4z"/></svg></span>剪贴板历史列表</h3>
+            <p>电脑端把收发过的内容存成一个列表，随时<b>翻回去、挑任意一条粘贴</b> —— 再也不怕「刚复制的，被下一条覆盖」。</p>
+          </div>
+          <div class="card">
+            <h3><span class="ic g"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 00-5 5v3H5v12h14V10h-2V7a5 5 0 00-5-5zm-3 8V7a3 3 0 016 0v3z"/></svg></span>历史只在本机、同样加密</h3>
+            <p>历史保存在你自己的设备上、沿用<b>端到端加密</b>；要清空、要关掉，都由你说了算。</p>
+          </div>
+        </div>
+        <div class="hist">
+          <div class="hh"><span class="dots"><i></i><i></i><i></i></span>📋 剪贴板历史　·　点任意一条即可粘贴</div>
+          <div class="hrow sel"><span class="htype" style="background:#2e7df6">文</span><span class="hprev">$ cargo build --release -p airpaste-tray</span><span class="htime">刚刚</span><span class="hbtn">粘贴</span></div>
+          <div class="hrow"><span class="htype" style="background:#2eb872">图</span><span class="hprev">截图 2026-06-30 10-24-11.png</span><span class="htime">2 分钟前</span></div>
+          <div class="hrow"><span class="htype" style="background:#179aa6">链</span><span class="hprev">https://tdon9.asuscomm.com:14014/health</span><span class="htime">上午 10:21</span></div>
+          <div class="hrow"><span class="htype" style="background:#d98e2b">码</span><span class="hprev">验证码 386204（5 分钟内有效）</span><span class="htime">昨天</span></div>
+          <div class="hrow"><span class="htype" style="background:#5b6776">件</span><span class="hprev">report-final-v3.pdf</span><span class="htime">昨天</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7 · 结尾 -->
+  <section class="slide dark">
+    <div class="wrap" style="justify-content:center;text-align:center;align-items:center">
+      <div class="big" style="font-size:60px">复制一处，处处可粘</div>
+      <div class="oneline" style="margin-top:18px">跨 Mac / Windows / iPhone　·　端到端加密　·　自托管不上云</div>
+      <div style="margin-top:34px;display:flex;gap:12px;justify-content:center;align-items:center;color:#9fb3d4;font-size:15px">
+        <span class="logo" style="--ls:32px;box-shadow:none"><svg viewBox="0 0 64 64"><polygon points="50,13 13,31 31,34" fill="#fff"/><polygon points="50,13 31,34 33,51" fill="#fff"/></svg></span>
+        AirPaste · v0.1.1 现在就能装 · 谢谢，请提问
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div id="hint">← → 翻页 · F 全屏 · 点视频播放</div>
+<div id="progress"></div>
+<div id="chrome">
+  <span class="brand"><span class="logo" style="--ls:18px;border-radius:5px;box-shadow:none"><svg viewBox="0 0 64 64"><polygon points="50,13 13,31 31,34" fill="#fff"/><polygon points="50,13 31,34 33,51" fill="#fff"/></svg></span>AirPaste · 个人 AI 提效竞赛（技术赛道）</span>
+  <span><span id="cur">1</span> / <span id="tot">6</span></span>
+</div>
+
+<script>
+const slides=[...document.querySelectorAll('.slide')];
+const tot=slides.length; let i=0;
+const cur=document.getElementById('cur'),prog=document.getElementById('progress');
+document.getElementById('tot').textContent=tot;
+function show(n){
+  i=Math.max(0,Math.min(tot-1,n));
+  slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+  cur.textContent=i+1; prog.style.width=((i+1)/tot*100)+'%';
+  if(location.hash!=='#'+(i+1)) history.replaceState(null,'','#'+(i+1));
+  // pause any playing video when leaving
+  document.querySelectorAll('video').forEach(v=>{if(!v.closest('.slide').classList.contains('active'))v.pause();});
+}
+function fit(){const s=Math.min(window.innerWidth/1280,window.innerHeight/720);document.getElementById('stage').style.transform='translate(-50%,-50%) scale('+s+')';}
+addEventListener('resize',fit);fit();
+addEventListener('keydown',e=>{
+  if(['ArrowRight','PageDown',' '].includes(e.key)){show(i+1);e.preventDefault();}
+  else if(['ArrowLeft','PageUp'].includes(e.key)){show(i-1);e.preventDefault();}
+  else if(e.key==='Home')show(0); else if(e.key==='End')show(tot-1);
+  else if(e.key.toLowerCase()==='f'){if(!document.fullscreenElement)document.documentElement.requestFullscreen();else document.exitFullscreen();}
+});
+addEventListener('click',e=>{if(e.target.closest('video')||e.target.closest('.vph'))return;(e.clientX>innerWidth/2)?show(i+1):show(i-1);});
+// reveal video only if it actually loads; otherwise keep placeholder
+[['v1','ph1'],['v2','ph2']].forEach(([vid,phid])=>{
+  const v=document.getElementById(vid),ph=document.getElementById(phid);
+  v.addEventListener('loadeddata',()=>{v.style.display='block';ph.style.display='none';});
+});
+const start=Math.max(1,Math.min(tot,parseInt((location.hash||'').slice(1))||1));
+show(start-1);
+</script>
+</body>
+</html>
